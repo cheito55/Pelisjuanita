@@ -254,10 +254,11 @@ function extractVideo(pageUrl) {
     var host = "";
     try { host = pageUrl.match(/^https?:\/\/([^\/]+)/i)[1].toLowerCase(); } catch (e) {}
 
+
     if (isSeriesPlayerHost(host)) return seriesPlayerExtract(pageUrl);
     if (host.indexOf("ok.ru") !== -1 || host.indexOf("odnoklassniki") !== -1) return okExtract(pageUrl);
-    if (/voe|prowd/i.test(host)) return voeExtract(pageUrl);
-    if (/dood|do7|ds2|d0|ds0/i.test(host)) return doodExtract(pageUrl);
+    if (host.indexOf("voe") !== -1) return voeExtract(pageUrl);
+    if (host.indexOf("dood") !== -1 || host.indexOf("do7go") !== -1) return doodExtract(pageUrl);
     return genericExtract(pageUrl);
 }
 
@@ -436,6 +437,9 @@ function genericExtract(pageUrl, depth) {
 }
 
 // ========== SERIESPLAYER + WEB DE JUANITA (portado de PelisHub) ==========
+// En series (ej. El Principe del rap de Bel-Air) los servidores son reproductores
+// "seriesplayer.fortamomar.workers.dev/?id=..." que hay que pedir con el id re-codificado,
+// Referer de pelisjuanita.com y buscar el .m3u8 dinamico dentro del HTML.
 
 var JUANITA_WEB = "https://pelisjuanita.com";
 var SP_HOSTS = /fortamomar|seriesplayer\.|onfilom\.com|playspelis\.com|321moviesfree\.com|flixlat\.com/i;
@@ -447,8 +451,7 @@ var _spCache = {};
 var JUANITA_ALIASES = {
     "the fresh prince of bel air": "el-principe-del-rap-en-bel-air",
     "el principe del rap de bel air": "el-principe-del-rap-en-bel-air",
-    "el principe del rap en bel air": "el-principe-del-rap-en-bel-air",
-    "vaiana 2": "moana-2"
+    "el principe del rap en bel air": "el-principe-del-rap-en-bel-air"
 };
 
 function isSeriesPlayerHost(host) { return SP_HOSTS.test(host || ""); }
@@ -466,6 +469,7 @@ function normalizeMediaText(t) {
         .replace(/&quot;/gi, '"').replace(/&#39;/gi, "'");
 }
 
+// Re-codifica el parametro id (puede traer espacios, %2F, etc.) como lo hace PelisHub
 function encodePlayerUrl(url) {
     url = String(url || "").replace(/&amp;/g, "&");
     var m = /^(https?:\/\/[^?]+\?id=)(.+)$/i.exec(url);
@@ -535,7 +539,6 @@ function parseJuanitaWeb(html) {
     function add(u, lang, name) {
         u = cleanUrl(String(u || "").replace(/&amp;/g, "&"));
         if (u.indexOf("//") === 0) u = "https:" + u;
-        else if (u.indexOf("/") === 0) u = JUANITA_WEB + u; // Arregla iframes relativos
         if (!/^https?:\/\//i.test(u) || seen[u]) return;
         seen[u] = 1;
         out.push({ url: u, audio: lang || "", server_name: name || "Web" });
@@ -549,18 +552,16 @@ function parseJuanitaWeb(html) {
         if (!/^https?:|^\/\//i.test(u)) { var d = webB64(u); if (/^https?:\/\//i.test(d)) u = d; }
         add(u, a["data-idioma"] || "", "Web");
     }
-    re = /https?:\/\/(?:seriesplayer\.)?fortamomar\.workers\.dev\/\?id=[^\s"'<>]+/gi;
+    re = /https?:\/\/(?:seriesplayer\.)?fortamomar\.workers\.dev\/\?id=[^\s"'<>]*/gi;
     while ((m = re.exec(html)) !== null) add(m[0], "Latino", "SeriesPlayer");
-    re = /https?:\/\/seriesplayer\.[a-z0-9._-]+\/\?id=[^\s"'<>]+/gi;
+    re = /https?:\/\/seriesplayer\.[a-z0-9._-]+\/\?id=[^\s"'<>]*/gi;
     while ((m = re.exec(html)) !== null) add(m[0], "Latino", "SeriesPlayer");
     re = /(?:data-url|href|src)=["']([^"']*fortamomar[^"']*|[^"']*seriesplayer[^"']*)["']/gi;
     while ((m = re.exec(html)) !== null) add(m[1], "Latino", "SeriesPlayer");
     tags = html.match(/<iframe\b[^>]*>/gi) || [];
     for (i = 0; i < tags.length; i++) {
         var a2 = attrsOf(tags[i]), src = a2["src"] || a2["data-src"] || "";
-        if (src && !/youtube|facebook/i.test(src)) {
-            add(src, "Latino", "Servidor Web");
-        }
+        if (/fortamomar|seriesplayer|onfilom|playspelis|flixlat/i.test(src)) add(src, "Latino", "SeriesPlayer");
     }
     return out;
 }
@@ -588,7 +589,7 @@ function juanitaWebServers(isTv, slug, t, e) {
         JUANITA_WEB + (isTv ? "/series/search?s=" : "/movies/search?s=") + encodeURIComponent(words.join(" ")),
         { "Referer": JUANITA_WEB + "/" });
     if (body) {
-        var re = isTv ? /\/series\/(?:ver-serie|serie)\/([a-z0-9\-]+)/gi : /(?:\/movies\/(?:pelicula|movie|ver)\/|movieInfo\.php\?title=)([a-z0-9\-]+)/gi, m, n = 0;
+        var re = isTv ? /\/series\/ver-serie\/([a-z0-9\-]+)/gi : /(?:\/movies\/(?:pelicula|movie)\/|movieInfo\.php\?title=)([a-z0-9\-]+)/gi, m, n = 0;
         while ((m = re.exec(body)) !== null && n < 2) {
             var cand = m[1];
             if (tried[cand]) continue;
@@ -659,9 +660,9 @@ function doSearch(query) {
     return videos;
 }
 
-// Modificado: Eliminamos Filemoon y Vimeus de SKIP_HOSTS para que el genericExtract los descifre
-var SKIP_HOSTS = [];
-var MAX_SOURCES = 8; // Aumentado para que capture más
+// Hosts sin extractor funcional: se saltean para no perder tiempo (cada intento es una petición lenta)
+var SKIP_HOSTS = ["vimeus.com", "bysesukior.com", "filemoon"];
+var MAX_SOURCES = 3;
 
 function hostOf(url) {
     try { return url.match(/^https?:\/\/([^\/]+)/i)[1].toLowerCase(); } catch (e) { return ""; }
@@ -801,6 +802,43 @@ function getEpisodes(slug) {
     return { info: info, videos: vids };
 }
 
+function extractWebLive(slug) {
+    if (!slug) return null;
+    var candidates = [];
+    // Variantes comunes de páginas de canal en la web
+    candidates.push("https://pelisjuanita.com/tv/" + slug + ".html");
+    candidates.push("https://pelisjuanita.com/tv/" + slug.replace(/-/g, "") + ".html");
+    candidates.push("https://pelisjuanita.com/tv/" + slug.replace(/-/g, "_") + ".html");
+    // Algunas usan nombres sin guiones o especiales
+    var simple = slug.replace(/[^a-z0-9]/gi, "");
+    if (simple && simple !== slug) candidates.push("https://pelisjuanita.com/tv/" + simple + ".html");
+
+    for (var i = 0; i < candidates.length; i++) {
+        var pageUrl = candidates[i];
+        addDebug("[web-live] probando " + pageUrl);
+        var html = httpGet(pageUrl, { "Referer": "https://pelisjuanita.com/" });
+        if (!html || html.length < 200) continue;
+        // Evitar páginas de acceso / Cloudflare / login
+        if (/Acceso|Just a moment|challenge-platform|cf-chl/i.test(html.substring(0, 800))) {
+            addDebug("[web-live] bloqueado o acceso");
+            continue;
+        }
+        var hit = findStreamIn(html, pageUrl);
+        if (hit && isM3u8Url(hit)) {
+            addDebug("[web-live] OK m3u8 -> " + hit.substring(0, 100));
+            return hit;
+        }
+        // Intento más profundo con genericExtract (sigue redirects, unpack, etc.)
+        var extracted = genericExtract(pageUrl);
+        if (extracted && isM3u8Url(extracted)) {
+            addDebug("[web-live] OK via generic -> " + extracted.substring(0, 100));
+            return extracted;
+        }
+    }
+    addDebug("[web-live] sin m3u8 en páginas web");
+    return null;
+}
+
 function doDetails(url) {
     _debugLog = "";
     _jsProbed = false;
@@ -832,34 +870,23 @@ function doDetails(url) {
         if (!ch) { doHome(); ch = _channels[ckey]; } // si se abrió sin pasar por el home
         if (!ch) throw new ScriptException("Canal no encontrado: " + ckey + "\n" + _debugLog);
         var csrc = [];
-        
-        var reqMod = {
-            headers: { 
-                "Referer": "https://pelisjuanita.com/", 
-                "Origin": "https://pelisjuanita.com",
-                "User-Agent": UA 
-            }
-        };
 
-        if (ch.m3u8) {
-            csrc.push(new HLSSource({
-                name: "Directo",
-                url: cleanUrl(ch.m3u8),
-                duration: 0,
-                requestModifier: reqMod
-            }));
+        // 1. Intentar el m3u8 real que usa la web (lo que captura Web Video Cast)
+        var webM3u8 = extractWebLive(ckey);
+        if (webM3u8) {
+            csrc.push(buildSource(webM3u8, "Web HLS", "https://pelisjuanita.com/", false));
+            addDebug("[canal] usando m3u8 de la web");
         }
-        
+
+        // 2. m3u8 de la API (raro que venga)
+        if (ch.m3u8) csrc.push(mkHls(cleanUrl(ch.m3u8), "API HLS"));
+
+        // 3. DASH de la API como último recurso (suele estar cifrado)
         if (ch.dash && typeof DashSource !== "undefined") {
-            csrc.push(new DashSource({
-                name: "DASH",
-                url: cleanUrl(ch.dash),
-                duration: 0,
-                requestModifier: reqMod
-            }));
+            csrc.push(new DashSource({ name: "DASH (API)", url: cleanUrl(ch.dash), duration: 0 }));
         }
-        
-        if (!csrc.length) throw new ScriptException("Canal sin m3u8/dash. Datos: " + JSON.stringify(ch).substring(0, 400));
+
+        if (!csrc.length) throw new ScriptException("Canal sin fuentes. Datos: " + JSON.stringify(ch).substring(0, 400));
         addDebug("[canal] campos=" + Object.keys(ch).join(","));
         addDebug("[canal] m3u8=" + (ch.m3u8 || "-"));
         addDebug("[canal] dash=" + (ch.dash || "-"));
