@@ -244,9 +244,35 @@ function extractVideo(pageUrl) {
 
     addDebug("[extract] host=" + host);
 
+    if (host.indexOf("ok.ru") !== -1 || host.indexOf("odnoklassniki") !== -1) return okExtract(pageUrl);
     if (host.indexOf("voe") !== -1) return voeExtract(pageUrl);
     if (host.indexOf("dood") !== -1 || host.indexOf("do7go") !== -1) return doodExtract(pageUrl);
     return genericExtract(pageUrl);
+}
+
+function okExtract(pageUrl) {
+    try {
+        var html = httpGet(pageUrl, { "Referer": "https://ok.ru/" });
+        if (!html) { addDebug("[ok] html vacío"); return null; }
+        var m = html.match(/data-options="([^"]*)"/);
+        if (!m) { addDebug("[ok] sin data-options. len=" + html.length + " html=" + html.substring(0, 150).replace(/\s+/g, " ")); return null; }
+        var txt = m[1].replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
+        var o = JSON.parse(txt);
+        var fv = o.flashvars || {};
+        var meta = fv.metadata;
+        if (typeof meta === "string") meta = JSON.parse(meta);
+        meta = meta || {};
+        var hls = meta.hlsManifestUrl || meta.ondemandHls || meta.hlsMasterPlaylistUrl || fv.hlsManifestUrl || fv.hlsMasterPlaylistUrl;
+        if (hls) { if (hls.indexOf("//") === 0) hls = "https:" + hls; return cleanUrl(hls); }
+        var order = ["ultra", "quad", "full", "hd", "sd", "low", "lowest", "mobile"], vids = meta.videos || [];
+        for (var i = 0; i < order.length; i++) {
+            for (var j = 0; j < vids.length; j++) {
+                if (vids[j].name === order[i] && vids[j].url) return "mp4:" + cleanUrl(vids[j].url);
+            }
+        }
+        addDebug("[ok] sin hls ni videos. meta=" + Object.keys(meta).join(","));
+        return null;
+    } catch (e) { addDebug("[ok] error: " + e); return null; }
 }
 
 function voeExtract(pageUrl) {
@@ -425,13 +451,16 @@ function resolveSources(servidores) {
     var max = Math.min(servidores.length, 6);
     for (var i = 0; i < max; i++) {
         var srv = servidores[i];
-        var url = srv.url || "";
+        var url = srv.url || srv.link || "";
         if (!url) continue;
-        var name = (srv["server-name"] || srv.ServerName || "Servidor") + " [" + (srv.idioma || "") + "]";
+        var name = (srv.server_name || srv["server-name"] || srv.ServerName || srv.nombre || "Servidor") + " [" + (srv.audio || srv.idioma || "") + "]";
         addDebug("[resolve] probando " + name);
         var hls = extractVideo(url);
         if (hls) {
-            var isMp4 = !isM3u8Url(hls) && (hls.indexOf(".mp4") !== -1 || hls.indexOf("token=") !== -1);
+            var forceMp4 = hls.indexOf("mp4:") === 0;
+            if (forceMp4) hls = hls.substring(4);
+            addDebug("[resolve] url=" + hls.substring(0, 110));
+            var isMp4 = forceMp4 || !isM3u8Url(hls) && (hls.indexOf(".mp4") !== -1 || hls.indexOf("token=") !== -1);
             var src = isMp4
                 ? new VideoUrlSource({ name: name, url: hls, container: "video/mp4", width: 0, height: 0, duration: 0, codec: "" })
                 : mkHls(hls, name);
