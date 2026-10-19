@@ -13,6 +13,11 @@ var PPID = new PlatformID("Pelisjuanita", "Pelisjuanita", PID);
 var _debugLog = "";
 var _channels = {};
 var _jsProbed = false;
+var _hostFail = {};
+// streamwish.to solo es un redirector (main.js hace window.location = "https://<espejo>" + ruta).
+// Espejos confirmados abriendo streamwish.to/e/ID en el navegador.
+var WISH_MIRRORS = ["medixiru.com", "hgplaycdn.com", "playnixes.com"];
+var FAIL_ONCE_HOSTS = ["streamwish.to", "goodstream.one"];
 
 function addDebug(msg) { _debugLog += String(msg) + "\n"; }
 
@@ -243,7 +248,6 @@ function extractVideo(pageUrl) {
     var host = "";
     try { host = pageUrl.match(/^https?:\/\/([^\/]+)/i)[1].toLowerCase(); } catch (e) {}
 
-    addDebug("[extract] host=" + host);
 
     if (host.indexOf("ok.ru") !== -1 || host.indexOf("odnoklassniki") !== -1) return okExtract(pageUrl);
     if (host.indexOf("voe") !== -1) return voeExtract(pageUrl);
@@ -384,6 +388,19 @@ function genericExtract(pageUrl, depth) {
                 return genericExtract(next, (depth || 0) + 1);
             }
         }
+        // Página-redirector (stub con main.js): probar los espejos con la misma ruta (/e/ID)
+        if (!depth && html.length < 1200 && /\/main\.js/.test(html)) {
+            var wp = pageUrl.match(/^https?:\/\/[^\/]+(\/.*)$/);
+            if (wp) {
+                for (var wi = 0; wi < WISH_MIRRORS.length; wi++) {
+                    var cand = "https://" + WISH_MIRRORS[wi] + wp[1];
+                    addDebug("[wish] probando espejo " + WISH_MIRRORS[wi]);
+                    var got = genericExtract(cand, 5);
+                    if (got) return got;
+                }
+            }
+        }
+
         // Páginas tipo SPA ("Loading..."): mirar el JS principal para ver qué API usan
         var js = html.match(/<script[^>]+src=["'](\/[^"']+\.js[^"']*)["']/i);
         if (js && !_jsProbed) {
@@ -399,7 +416,7 @@ function genericExtract(pageUrl, depth) {
             addDebug("[generic] js=" + jsUrl + " len=" + jsTxt.length + " fetch=" + hits.join(" ; ") + " urls=" + urls.join(" ; "));
         }
         addDebug("[generic] sin m3u8 ni packed. len=" + html.length + " html=" +
-            html.substring(0, html.length < 1200 ? 160 : 100).replace(/\s+/g, " "));
+            html.substring(0, 50).replace(/\s+/g, " "));
         return null;
     } catch (e) {
         addDebug("[generic] error: " + e);
@@ -497,9 +514,14 @@ function resolveSources(servidores) {
     for (var j = 0; j < list.length && sources.length < MAX_SOURCES; j++) {
         var it = list[j], sv = it.srv;
         var name = (sv.server_name || sv["server-name"] || sv.ServerName || sv.nombre || "Servidor") + " [" + (sv.audio || sv.idioma || "") + "]";
+        var h = hostOf(it.url);
+        if (_hostFail[h]) { addDebug("[resolve] salteado (ya falló): " + h); continue; }
         addDebug("[resolve] probando " + name);
         var hls = extractVideo(it.url);
-        if (!hls) continue;
+        if (!hls) {
+            for (var f = 0; f < FAIL_ONCE_HOSTS.length; f++) if (h.indexOf(FAIL_ONCE_HOSTS[f]) !== -1) _hostFail[h] = true;
+            continue;
+        }
 
         var forceMp4 = hls.indexOf("mp4:") === 0;
         if (forceMp4) hls = hls.substring(4);
@@ -547,6 +569,7 @@ function getEpisodes(slug) {
 function doDetails(url) {
     _debugLog = "";
     _jsProbed = false;
+    _hostFail = {};
     if (!url) return mkDetail("", "Sin URL", "", "", [], "");
 
     var m = url.match(/pj:\/\/movie\/([^\/]+)/);
