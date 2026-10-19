@@ -12,6 +12,7 @@ var AES_IV  = "1234567890123456";
 var PPID = new PlatformID("Pelisjuanita", "Pelisjuanita", PID);
 var _debugLog = "";
 var _channels = {};
+var _jsProbed = false;
 
 function addDebug(msg) { _debugLog += String(msg) + "\n"; }
 
@@ -385,7 +386,8 @@ function genericExtract(pageUrl, depth) {
         }
         // Páginas tipo SPA ("Loading..."): mirar el JS principal para ver qué API usan
         var js = html.match(/<script[^>]+src=["'](\/[^"']+\.js[^"']*)["']/i);
-        if (js) {
+        if (js && !_jsProbed) {
+            _jsProbed = true;
             var jsUrl = pageUrl.match(/^(https?:\/\/[^\/]+)/i)[1] + js[1];
             var jsTxt = httpGet(jsUrl, { "Referer": pageUrl });
             var apis = [], am, are = /["'`](\/(?:api|ajax|get|embed|source|player|stream)[^"'`\s]{0,80})["'`]/gi;
@@ -445,28 +447,62 @@ function doSearch(query) {
     return videos;
 }
 
+// Hosts sin extractor funcional: se saltean para no perder tiempo (cada intento es una petición lenta)
+var SKIP_HOSTS = ["vimeus.com", "bysesukior.com", "filemoon"];
+var MAX_SOURCES = 3;
+
+function hostOf(url) {
+    try { return url.match(/^https?:\/\/([^\/]+)/i)[1].toLowerCase(); } catch (e) { return ""; }
+}
+
+// Menor número = se prueba primero
+function hostPriority(host) {
+    if (host.indexOf("ok.ru") !== -1) return 0;
+    if (/wish|vidhide|callistanise|vibuxer|morencius|lulustream/.test(host)) return 1;
+    if (host.indexOf("dood") !== -1 || host.indexOf("do7go") !== -1 || host.indexOf("ds2") !== -1) return 2;
+    return 3;
+}
+
+// Confirma que la URL devuelve realmente una playlist HLS (evita fuentes muertas que dejan el reproductor cargando)
+function isLiveHls(url) {
+    var body = httpGet(url, {});
+    if (!body) return true; // sin respuesta (p. ej. dominio no permitido): no se descarta
+    return body.indexOf("#EXTM3U") !== -1;
+}
+
 function resolveSources(servidores) {
     var sources = [];
     if (!servidores || !servidores.length) return sources;
-    var max = Math.min(servidores.length, 6);
-    for (var i = 0; i < max; i++) {
+
+    var list = [];
+    for (var i = 0; i < servidores.length; i++) {
         var srv = servidores[i];
-        var url = srv.url || srv.link || "";
+        var url = cleanUrl(srv.url || srv.link || "");
         if (!url) continue;
-        var name = (srv.server_name || srv["server-name"] || srv.ServerName || srv.nombre || "Servidor") + " [" + (srv.audio || srv.idioma || "") + "]";
+        var host = hostOf(url), skip = false;
+        for (var k = 0; k < SKIP_HOSTS.length; k++) if (host.indexOf(SKIP_HOSTS[k]) !== -1) skip = true;
+        if (skip) { addDebug("[resolve] salteado (sin extractor): " + host); continue; }
+        list.push({ srv: srv, url: url, pr: hostPriority(host), idx: i });
+    }
+    list.sort(function (a, b) { return (a.pr - b.pr) || (a.idx - b.idx); });
+
+    for (var j = 0; j < list.length && sources.length < MAX_SOURCES; j++) {
+        var it = list[j], sv = it.srv;
+        var name = (sv.server_name || sv["server-name"] || sv.ServerName || sv.nombre || "Servidor") + " [" + (sv.audio || sv.idioma || "") + "]";
         addDebug("[resolve] probando " + name);
-        var hls = extractVideo(url);
-        if (hls) {
-            var forceMp4 = hls.indexOf("mp4:") === 0;
-            if (forceMp4) hls = hls.substring(4);
-            addDebug("[resolve] url=" + hls.substring(0, 110));
-            var isMp4 = forceMp4 || !isM3u8Url(hls) && (hls.indexOf(".mp4") !== -1 || hls.indexOf("token=") !== -1);
-            var src = isMp4
-                ? new VideoUrlSource({ name: name, url: hls, container: "video/mp4", width: 0, height: 0, duration: 0, codec: "" })
-                : mkHls(hls, name);
-            if (src) sources.push(src);
-            addDebug("[resolve] OK: " + name);
-        }
+        var hls = extractVideo(it.url);
+        if (!hls) continue;
+
+        var forceMp4 = hls.indexOf("mp4:") === 0;
+        if (forceMp4) hls = hls.substring(4);
+        var isMp4 = forceMp4 || (!isM3u8Url(hls) && (hls.indexOf(".mp4") !== -1 || hls.indexOf("token=") !== -1));
+        if (!isMp4 && !isLiveHls(hls)) { addDebug("[resolve] descartado (no es m3u8 válido): " + name); continue; }
+
+        addDebug("[resolve] url=" + hls.substring(0, 110));
+        var src = isMp4
+            ? new VideoUrlSource({ name: name, url: hls, container: "video/mp4", width: 0, height: 0, duration: 0, codec: "" })
+            : mkHls(hls, name);
+        if (src) { sources.push(src); addDebug("[resolve] OK: " + name); }
     }
     return sources;
 }
@@ -493,6 +529,7 @@ function getEpisodes(slug) {
 
 function doDetails(url) {
     _debugLog = "";
+    _jsProbed = false;
     if (!url) return mkDetail("", "Sin URL", "", "", [], "");
 
     var m = url.match(/pj:\/\/movie\/([^\/]+)/);
