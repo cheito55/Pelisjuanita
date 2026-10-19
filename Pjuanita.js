@@ -14,6 +14,7 @@ var _debugLog = "";
 var _channels = {};
 var _jsProbed = false;
 var _hostFail = {};
+var _lastUrl = "";
 // streamwish.to solo es un redirector (main.js hace window.location = "https://<espejo>" + ruta).
 // Espejos confirmados abriendo streamwish.to/e/ID en el navegador.
 var WISH_MIRRORS = ["medixiru.com", "hgplaycdn.com", "playnixes.com"];
@@ -26,7 +27,12 @@ function httpGet(url, headers) {
         var h = headers || {};
         if (!h["User-Agent"]) h["User-Agent"] = UA;
         var r = http.GET(url, h);
-        return (r && r.body) ? r.body : "";
+        _lastUrl = (r && r.url) ? r.url : url;
+        if (!r || !r.body) {
+            addDebug("[http] vacío code=" + (r ? r.code : "?") + " " + String(url).substring(0, 60));
+            return "";
+        }
+        return r.body;
     } catch (e) {
         addDebug("HTTP error: " + e);
         return "";
@@ -293,14 +299,15 @@ function voeExtract(pageUrl) {
 }
 
 function doodPassMd5(pageUrl) {
-    var origin = pageUrl.match(/^(https?:\/\/[^\/]+)/i)[1];
     var html = httpGet(pageUrl, { "Referer": pageUrl });
     if (!html) return null;
+    var finalUrl = _lastUrl || pageUrl;
+    var origin = finalUrl.match(/^(https?:\/\/[^\/]+)/i)[1];
     var pm = html.match(/\/pass_md5\/[^'"\s]+/);
     if (!pm) { addDebug("[dood] sin pass_md5, len=" + html.length); return null; }
     var tk = pm[0].split("/").pop();
-    var base = httpGet(origin + pm[0], { "Referer": pageUrl });
-    if (!base || base.indexOf("http") !== 0) { addDebug("[dood] respuesta pass_md5 rara"); return null; }
+    var base = httpGet(origin + pm[0], { "Referer": finalUrl });
+    if (!base || base.indexOf("http") !== 0) { addDebug("[dood] pass_md5 rara en " + origin + ": " + String(base).substring(0, 60).replace(/\s+/g, " ")); return null; }
     var chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789", rnd = "";
     for (var i = 0; i < 10; i++) rnd += chars.charAt(Math.floor(Math.random() * chars.length));
     return base + rnd + "?token=" + tk + "&expiry=" + Date.now();
@@ -413,6 +420,10 @@ function genericExtract(pageUrl, depth) {
             while ((um = ure.exec(jsTxt)) !== null && urls.length < 6) {
                 if (!/cloudflare|w3\.org|reactjs|github/i.test(um[0]) && urls.indexOf(um[0]) === -1) urls.push(um[0]);
             }
+            var ap = [], apm, apre = /["'`](\/api\/[^"'`\s]{1,60})["'`]/g;
+            while ((apm = apre.exec(jsTxt)) !== null && ap.length < 8) if (ap.indexOf(apm[1]) === -1) ap.push(apm[1]);
+            var vki = jsTxt.indexOf("view_key");
+            addDebug("[generic] api=" + ap.join(" ; ") + " vk=" + (vki >= 0 ? jsTxt.substring(Math.max(0, vki - 60), vki + 90).replace(/\s+/g, " ") : "-"));
             addDebug("[generic] js=" + jsUrl + " len=" + jsTxt.length + " fetch=" + hits.join(" ; ") + " urls=" + urls.join(" ; "));
         }
         addDebug("[generic] sin m3u8 ni packed. len=" + html.length + " html=" +
@@ -488,7 +499,9 @@ function hostPriority(host) {
 function isLiveHls(url) {
     var body = httpGet(url, {});
     if (!body) return true; // sin respuesta (p. ej. dominio no permitido): no se descarta
-    return body.indexOf("#EXTM3U") !== -1;
+    var ok = body.indexOf("#EXTM3U") !== -1;
+    if (!ok) addDebug("[hls] respuesta: " + body.substring(0, 80).replace(/\s+/g, " "));
+    return ok;
 }
 
 function resolveSources(servidores) {
