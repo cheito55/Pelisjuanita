@@ -255,6 +255,7 @@ function extractVideo(pageUrl) {
     try { host = pageUrl.match(/^https?:\/\/([^\/]+)/i)[1].toLowerCase(); } catch (e) {}
 
 
+    if (isSeriesPlayerHost(host)) return seriesPlayerExtract(pageUrl);
     if (host.indexOf("ok.ru") !== -1 || host.indexOf("odnoklassniki") !== -1) return okExtract(pageUrl);
     if (host.indexOf("voe") !== -1) return voeExtract(pageUrl);
     if (host.indexOf("dood") !== -1 || host.indexOf("do7go") !== -1) return doodExtract(pageUrl);
@@ -435,6 +436,186 @@ function genericExtract(pageUrl, depth) {
     }
 }
 
+// ========== SERIESPLAYER + WEB DE JUANITA (portado de PelisHub) ==========
+// En series (ej. El Principe del rap de Bel-Air) los servidores son reproductores
+// "seriesplayer.fortamomar.workers.dev/?id=..." que hay que pedir con el id re-codificado,
+// Referer de pelisjuanita.com y buscar el .m3u8 dinamico dentro del HTML.
+
+var JUANITA_WEB = "https://pelisjuanita.com";
+var SP_HOSTS = /fortamomar|seriesplayer\.|onfilom\.com|playspelis\.com|321moviesfree\.com|flixlat\.com/i;
+var SP_DEFAULT_REF = "https://seriesplayer.fortamomar.workers.dev/";
+var _refOverride = "";
+var _spCache = {};
+
+// slug de la web que no coincide con el de la app
+var JUANITA_ALIASES = {
+    "the fresh prince of bel air": "el-principe-del-rap-en-bel-air",
+    "el principe del rap de bel air": "el-principe-del-rap-en-bel-air",
+    "el principe del rap en bel air": "el-principe-del-rap-en-bel-air"
+};
+
+function isSeriesPlayerHost(host) { return SP_HOSTS.test(host || ""); }
+
+function normSlugWords(s) {
+    return String(s || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").replace(/\s+\d{4}$/, "").trim();
+}
+
+function normalizeMediaText(t) {
+    return String(t || "")
+        .replace(/\\u0026/gi, "&").replace(/\\u002F/gi, "/")
+        .replace(/\\u003A/gi, ":").replace(/\\u003F/gi, "?")
+        .replace(/\\u003D/gi, "=").replace(/\\u0023/gi, "#")
+        .replace(/\\\//g, "/").replace(/&amp;/gi, "&")
+        .replace(/&quot;/gi, '"').replace(/&#39;/gi, "'");
+}
+
+// Re-codifica el parametro id (puede traer espacios, %2F, etc.) como lo hace PelisHub
+function encodePlayerUrl(url) {
+    url = String(url || "").replace(/&amp;/g, "&");
+    var m = /^(https?:\/\/[^?]+\?id=)(.+)$/i.exec(url);
+    if (!m) return url;
+    try {
+        var id = decodeURIComponent(m[2]);
+        return m[1] + encodeURIComponent(id).replace(/%2F/gi, "/").replace(/%20/g, "+");
+    } catch (e) {
+        return m[1] + encodeURIComponent(m[2]).replace(/%2F/gi, "/");
+    }
+}
+
+function findMediaUrls(text) {
+    var out = [], t = normalizeMediaText(text), m, re, u;
+    re = /https?:\/\/[^\s"'<>\\]+?\.m3u8(?:\?[^\s"'<>\\]*)?/gi;
+    while ((m = re.exec(t)) !== null) { u = cleanUrl(m[0]); if (out.indexOf(u) < 0) out.push(u); }
+    if (out.length) return out;
+    re = /https?:\/\/[^\s"'<>\\]+?\.mp4(?:\?[^\s"'<>\\]*)?/gi;
+    while ((m = re.exec(t)) !== null) { u = cleanUrl(m[0]); if (out.indexOf(u) < 0) out.push("mp4:" + u); }
+    return out;
+}
+
+function seriesPlayerExtract(url) {
+    var raw = cleanUrl(String(url || "").replace(/&amp;/g, "&"));
+    if (!raw) return null;
+    if (isM3u8Url(raw)) { _refOverride = SP_DEFAULT_REF; return raw; }
+    if (/\.mp4(?:[?#]|$)/i.test(raw)) { _refOverride = SP_DEFAULT_REF; return "mp4:" + raw; }
+    if (_spCache[raw]) { _refOverride = _spCache[raw].ref; return _spCache[raw].url; }
+
+    var tries = [encodePlayerUrl(raw)], i, mfull;
+    if (tries.indexOf(raw) < 0) tries.push(raw);
+    mfull = /^(https?:\/\/[^?]+\?id=)(.+)$/i.exec(raw);
+    if (mfull) {
+        try { var full = mfull[1] + encodeURIComponent(decodeURIComponent(mfull[2])); if (tries.indexOf(full) < 0) tries.push(full); } catch (e) {}
+    }
+    for (i = 0; i < tries.length; i++) {
+        var html = httpGet(tries[i], { "Referer": JUANITA_WEB + "/" });
+        if (!html) { addDebug("[sp] intento " + (i + 1) + ": sin HTML"); continue; }
+        if (/ID no v[áa]lido/i.test(html)) { addDebug("[sp] intento " + (i + 1) + ": ID no valido"); continue; }
+        addDebug("[sp] intento " + (i + 1) + ": html=" + html.length + "b");
+        var found = findMediaUrls(html);
+        if (found.length) {
+            _refOverride = tries[i];
+            _spCache[raw] = { url: found[0], ref: tries[i] };
+            addDebug("[sp] OK -> " + found[0].substring(0, 100));
+            return found[0];
+        }
+        addDebug("[sp] sin media. html=" + html.substring(0, 100).replace(/\s+/g, " "));
+    }
+    return null;
+}
+
+// --- parseo de la pagina web serieInfo.php / movieInfo.php ---
+function attrsOf(tag) {
+    var out = {}, re = /([a-zA-Z0-9_:\-]+)\s*=\s*(?:"([^"]*)"|'([^']*)')/g, m;
+    while ((m = re.exec(String(tag || ""))) !== null) out[m[1].toLowerCase()] = (m[2] != null ? m[2] : m[3]);
+    return out;
+}
+
+function webB64(s) {
+    try { return bytesToStr(b64ToBytes(s)); } catch (e) { return ""; }
+}
+
+function parseJuanitaWeb(html) {
+    var out = [], seen = {}, m, re, tags, i;
+    if (!html) return out;
+    function add(u, lang, name) {
+        u = cleanUrl(String(u || "").replace(/&amp;/g, "&"));
+        if (u.indexOf("//") === 0) u = "https:" + u;
+        if (!/^https?:\/\//i.test(u) || seen[u]) return;
+        seen[u] = 1;
+        out.push({ url: u, audio: lang || "", server_name: name || "Web" });
+    }
+    tags = html.match(/<[a-zA-Z][^>]*row-download[^>]*>/gi) || [];
+    for (i = 0; i < tags.length; i++) {
+        var a = attrsOf(tags[i]), tipo = (a["data-tipo"] || "").toLowerCase();
+        if (tipo === "torrent" || tipo === "magnet") continue;
+        var u = a["data-url"];
+        if (!u) continue;
+        if (!/^https?:|^\/\//i.test(u)) { var d = webB64(u); if (/^https?:\/\//i.test(d)) u = d; }
+        add(u, a["data-idioma"] || "", "Web");
+    }
+    re = /https?:\/\/(?:seriesplayer\.)?fortamomar\.workers\.dev\/\?id=[^\s"'<>]*/gi;
+    while ((m = re.exec(html)) !== null) add(m[0], "Latino", "SeriesPlayer");
+    re = /https?:\/\/seriesplayer\.[a-z0-9._-]+\/\?id=[^\s"'<>]*/gi;
+    while ((m = re.exec(html)) !== null) add(m[0], "Latino", "SeriesPlayer");
+    re = /(?:data-url|href|src)=["']([^"']*fortamomar[^"']*|[^"']*seriesplayer[^"']*)["']/gi;
+    while ((m = re.exec(html)) !== null) add(m[1], "Latino", "SeriesPlayer");
+    tags = html.match(/<iframe\b[^>]*>/gi) || [];
+    for (i = 0; i < tags.length; i++) {
+        var a2 = attrsOf(tags[i]), src = a2["src"] || a2["data-src"] || "";
+        if (/fortamomar|seriesplayer|onfilom|playspelis|flixlat/i.test(src)) add(src, "Latino", "SeriesPlayer");
+    }
+    return out;
+}
+
+function webPageUrl(isTv, slug, t, e) {
+    return isTv
+        ? JUANITA_WEB + "/series/serieInfo.php?nombreSerie=" + slug + "&nroTemporada=" + t + "&nroEpisodio=" + e
+        : JUANITA_WEB + "/movies/movieInfo.php?title=" + slug;
+}
+
+// Servidores desde la web de Pelisjuanita (misma ruta que usa PelisHub)
+function juanitaWebServers(isTv, slug, t, e) {
+    var slugs = [], tried = {}, i, list, alias = JUANITA_ALIASES[normSlugWords(slug)];
+    if (alias) slugs.push(alias);
+    slugs.push(slug);
+    for (i = 0; i < slugs.length; i++) {
+        if (!slugs[i] || tried[slugs[i]]) continue;
+        tried[slugs[i]] = 1;
+        list = parseJuanitaWeb(httpGet(webPageUrl(isTv, slugs[i], t, e), { "Referer": JUANITA_WEB + "/" }));
+        addDebug("[web] " + slugs[i] + " -> " + list.length + " servidor(es)");
+        if (list.length) return list;
+    }
+    // Buscador de la web: solo se acepta un slug que comparta palabras con el pedido
+    var words = normSlugWords(slug).split(" "), body = httpGet(
+        JUANITA_WEB + (isTv ? "/series/search?s=" : "/movies/search?s=") + encodeURIComponent(words.join(" ")),
+        { "Referer": JUANITA_WEB + "/" });
+    if (body) {
+        var re = isTv ? /\/series\/ver-serie\/([a-z0-9\-]+)/gi : /(?:\/movies\/(?:pelicula|movie)\/|movieInfo\.php\?title=)([a-z0-9\-]+)/gi, m, n = 0;
+        while ((m = re.exec(body)) !== null && n < 2) {
+            var cand = m[1];
+            if (tried[cand]) continue;
+            var cw = normSlugWords(cand).split(" "), hit = 0, k;
+            for (k = 0; k < words.length; k++) if (cw.indexOf(words[k]) >= 0) hit++;
+            if (words.length && hit / words.length < 0.6) continue;
+            tried[cand] = 1; n++;
+            list = parseJuanitaWeb(httpGet(webPageUrl(isTv, cand, t, e), { "Referer": JUANITA_WEB + "/" }));
+            addDebug("[web] buscador " + cand + " -> " + list.length);
+            if (list.length) return list;
+        }
+    }
+    return [];
+}
+
+function mergeServers(a, b) {
+    var out = [], seen = {}, i, all = (a || []).concat(b || []);
+    for (i = 0; i < all.length; i++) {
+        var u = cleanUrl((all[i] && (all[i].url || all[i].link)) || "");
+        if (!u || seen[u]) continue;
+        seen[u] = 1;
+        out.push(all[i]);
+    }
+    return out;
+}
+
 // ========== API ==========
 
 function apiGet(path) {
@@ -489,6 +670,7 @@ function hostOf(url) {
 
 // Menor número = se prueba primero
 function hostPriority(host) {
+    if (isSeriesPlayerHost(host)) return -1;
     if (host.indexOf("ok.ru") !== -1) return 0;
     if (/wish|vidhide|callistanise|vibuxer|morencius|lulustream/.test(host)) return 1;
     if (host.indexOf("dood") !== -1 || host.indexOf("do7go") !== -1 || host.indexOf("ds2") !== -1) return 2;
@@ -505,10 +687,16 @@ function buildSource(url, name, ref, isMp4) {
     if (ref) {
         rm = {
             allowByteSkip: true,
-            headers: { "Referer": ref, "User-Agent": UA },
+            headers: (function () {
+                var hh = { "Referer": ref, "User-Agent": UA }, om = String(ref).match(/^(https?:\/\/[^\/?#]+)/i);
+                if (om) hh["Origin"] = om[1];
+                return hh;
+            })(),
             modifyRequest: function (u, headers) {
                 var h = headers || {};
                 h["Referer"] = ref;
+                var om2 = String(ref).match(/^(https?:\/\/[^\/?#]+)/i);
+                if (om2) h["Origin"] = om2[1];
                 if (!h["User-Agent"]) h["User-Agent"] = UA;
                 return { url: u, headers: h };
             }
@@ -560,13 +748,14 @@ function resolveSources(servidores) {
         var h = hostOf(it.url);
         if (_hostFail[h]) { addDebug("[resolve] salteado (ya falló): " + h); continue; }
         addDebug("[resolve] probando " + name);
+        _refOverride = "";
         var hls = extractVideo(it.url);
         if (!hls) {
             for (var f = 0; f < FAIL_ONCE_HOSTS.length; f++) if (h.indexOf(FAIL_ONCE_HOSTS[f]) !== -1) _hostFail[h] = true;
             continue;
         }
 
-        var refOrigin = hostOrigin(_lastUrl || it.url);
+        var refOrigin = _refOverride || hostOrigin(_lastUrl || it.url);
         var forceMp4 = hls.indexOf("mp4:") === 0;
         if (forceMp4) hls = hls.substring(4);
         var isMp4 = forceMp4 || (!isM3u8Url(hls) && (hls.indexOf(".mp4") !== -1 || hls.indexOf("token=") !== -1));
@@ -617,6 +806,7 @@ function doDetails(url) {
     _debugLog = "";
     _jsProbed = false;
     _hostFail = {};
+    _refOverride = "";
     if (!url) return mkDetail("", "Sin URL", "", "", [], "");
 
     var m = url.match(/pj:\/\/movie\/([^\/]+)/);
@@ -625,7 +815,7 @@ function doDetails(url) {
         var data = apiGet("/movies.php?slug=" + encodeURIComponent(slug));
         if (!data || !data.datos) return mkDetail("m_" + slug, "No encontrado", "", url, [], "");
         var d = data.datos;
-        var servidores = parseServidores(d.servidores);
+        var servidores = mergeServers(parseServidores(d.servidores), juanitaWebServers(false, slug, 1, 1));
         var sources = resolveSources(servidores);
         var desc = (d.sinopsis || "") + "\n\nAño: " + (d.año || "") + "\nGénero: " + (d.genero || "");
         if (sources.length === 0) {
@@ -658,8 +848,11 @@ function doDetails(url) {
     if (ep) {
         var eslug = ep[1], et = ep[2], en = ep[3];
         var edata = apiGet("/series.php?slug=" + encodeURIComponent(eslug) + "&t=" + et + "&e=" + en);
-        if (!edata) throw new ScriptException("Sin respuesta del episodio T" + et + "E" + en);
-        var esources = resolveSources(parseServidores(edata.servidores));
+        var apiSrv = edata ? parseServidores(edata.servidores) : [];
+        addDebug("[api] T" + et + "E" + en + " -> " + apiSrv.length + " servidor(es)");
+        // Igual que PelisHub: se suman los servidores de la web (seriesplayer) a los de la API
+        var webSrv = juanitaWebServers(true, eslug, et, en);
+        var esources = resolveSources(mergeServers(apiSrv, webSrv));
         if (esources.length === 0) throw new ScriptException("SIN FUENTES\n" + _debugLog);
         return mkDetail("e_" + eslug + "_" + et + "_" + en, eslug + " T" + et + "E" + en, "", url, esources, "", false);
     }
