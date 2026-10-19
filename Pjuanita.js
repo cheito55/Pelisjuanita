@@ -244,14 +244,68 @@ function doodExtract(pageUrl) {
     } catch (e) { return null; }
 }
 
+// Desempaquetador del ofuscador clásico eval(function(p,a,c,k,e,d){...})
+function unpackJs(src) {
+    var m = src.match(/\}\('([\s\S]*)',\s*(\d+),\s*(\d+),\s*'([\s\S]*?)'\.split\('\|'\)/);
+    if (!m) return null;
+    var p = m[1].replace(/\\'/g, "'").replace(/\\\\/g, "\\");
+    var a = parseInt(m[2], 10), c = parseInt(m[3], 10), k = m[4].split("|");
+    function e(n) {
+        return (n < a ? "" : e(parseInt(n / a, 10))) +
+            ((n = n % a) > 35 ? String.fromCharCode(n + 29) : n.toString(36));
+    }
+    var d = {};
+    while (c--) d[e(c)] = k[c] || e(c);
+    return p.replace(/\b\w+\b/g, function (w) { return d[w] !== undefined ? d[w] : w; });
+}
+
+function findStreamIn(text, pageUrl) {
+    var origin = "";
+    try { origin = pageUrl.match(/^(https?:\/\/[^\/]+)/i)[1]; } catch (e) {}
+    function abs(u) {
+        u = cleanUrl(u);
+        if (/^https?:\/\//i.test(u)) return u;
+        if (u.indexOf("//") === 0) return "https:" + u;
+        if (u.charAt(0) === "/") return origin + u;
+        return u;
+    }
+    var m, re = /["']hls\d*["']\s*:\s*["']([^"']+)["']/gi, found = [];
+    while ((m = re.exec(text)) !== null) found.push(abs(m[1]));
+    if (found.length) return found[0];
+    m = text.match(/file\s*:\s*["']([^"']+\.m3u8[^"']*)["']/i);
+    if (m) return abs(m[1]);
+    m = text.match(/https?:\/\/[^"'\s<>\\]+\.m3u8[^"'\s<>\\]*/i);
+    if (m) return cleanUrl(m[0]);
+    return null;
+}
+
 function genericExtract(pageUrl) {
     try {
         var html = httpGet(pageUrl, { "Referer": pageUrl });
-        if (!html) return null;
-        var m = html.match(/https?:\/\/[^"'\s<>]+\.m3u8[^"'\s<>]*/i);
-        if (m) return cleanUrl(m[0]);
+        if (!html) { addDebug("[generic] html vacío"); return null; }
+
+        var hit = findStreamIn(html, pageUrl);
+        if (hit) return hit;
+
+        var idx = html.indexOf("eval(function(p,a,c,k,e,d)");
+        if (idx !== -1) {
+            var unpacked = unpackJs(html.substring(idx));
+            if (unpacked) {
+                hit = findStreamIn(unpacked, pageUrl);
+                if (hit) return hit;
+                addDebug("[generic] desempaquetado sin stream: " + unpacked.substring(0, 120).replace(/\s+/g, " "));
+                return null;
+            }
+            addDebug("[generic] packed JS no se pudo desempaquetar");
+            return null;
+        }
+
+        addDebug("[generic] sin m3u8 ni packed. len=" + html.length + " inicio=" + html.substring(0, 100).replace(/\s+/g, " "));
         return null;
-    } catch (e) { return null; }
+    } catch (e) {
+        addDebug("[generic] error: " + e);
+        return null;
+    }
 }
 
 // ========== API ==========
@@ -351,6 +405,9 @@ function doDetails(url) {
             csrc.push(new DashSource({ name: "DASH", url: cleanUrl(ch.dash), duration: 0 }));
         }
         if (!csrc.length) throw new ScriptException("Canal sin m3u8/dash. Datos: " + JSON.stringify(ch).substring(0, 400));
+        addDebug("[canal] campos=" + Object.keys(ch).join(","));
+        addDebug("[canal] m3u8=" + (ch.m3u8 || "-"));
+        addDebug("[canal] dash=" + (ch.dash || "-"));
         return mkDetail("ch_" + ckey, ch.nombre || ckey, ch.logo || "", url, csrc, "TV en vivo", true);
     }
 
