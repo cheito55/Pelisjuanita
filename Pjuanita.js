@@ -52,6 +52,19 @@ function mkVideo(id, title, thumb, url, author, isLive) {
     });
 }
 
+function mkItem(type, slug, title, thumb) {
+    if (type === "serie") {
+        return new PlatformPlaylist({
+            id: new PlatformID("Pelisjuanita", "s_" + slug, PID),
+            name: "[Serie] " + (title || slug),
+            thumbnail: thumb || "",
+            author: new PlatformAuthorLink(PPID, "Pelisjuanita", "https://pelisjuanita.com", "", 0),
+            datetime: 0, url: "pj://serie/" + slug, videoCount: -1
+        });
+    }
+    return mkVideo(type + "_" + slug, title, thumb, "pj://" + type + "/" + slug, "Pelisjuanita");
+}
+
 function mkHls(url, name) {
     if (!url) return null;
     return new HLSSource({ name: name || "HLS", url: url, duration: 0 });
@@ -196,11 +209,27 @@ function decryptServidores(b64) {
         var txt = utf8(plain);
         addDebug("[decrypt] OK: " + txt.substring(0, 80));
         var parsed = JSON.parse(txt);
-        return Array.isArray(parsed) ? parsed : (parsed.servidores || []);
+        return Array.isArray(parsed) ? parsed : (parsed && parsed.url ? [parsed] : ((parsed && parsed.servidores) || []));
     } catch (e) {
         addDebug("[decrypt] error: " + e);
         return [];
     }
+}
+
+// La API puede devolver servidores como string cifrado, array de strings cifrados o array plano
+function parseServidores(raw) {
+    if (!raw) return [];
+    if (typeof raw === "string") return decryptServidores(raw);
+    if (Array.isArray(raw)) {
+        if (!raw.length || typeof raw[0] !== "string") return raw;
+        var all = [];
+        for (var i = 0; i < raw.length; i++) {
+            var part = decryptServidores(raw[i]);
+            for (var j = 0; j < part.length; j++) all.push(part[j]);
+        }
+        return all;
+    }
+    return [];
 }
 
 // ========== EXTRACTORES ==========
@@ -328,6 +357,15 @@ function genericExtract(pageUrl, depth) {
                 return genericExtract(next, (depth || 0) + 1);
             }
         }
+        // Páginas tipo SPA ("Loading..."): mirar el JS principal para ver qué API usan
+        var js = html.match(/<script[^>]+src=["'](\/[^"']+\.js[^"']*)["']/i);
+        if (js) {
+            var jsUrl = pageUrl.match(/^(https?:\/\/[^\/]+)/i)[1] + js[1];
+            var jsTxt = httpGet(jsUrl, { "Referer": pageUrl });
+            var apis = [], am, are = /["'`](\/(?:api|ajax|get|embed|source|player|stream)[^"'`\s]{0,80})["'`]/gi;
+            while ((am = are.exec(jsTxt)) !== null && apis.length < 8) apis.push(am[1]);
+            addDebug("[generic] js=" + jsUrl + " len=" + jsTxt.length + " rutas=" + apis.join(" | "));
+        }
         addDebug("[generic] sin m3u8 ni packed. len=" + html.length + " html=" +
             html.substring(0, html.length < 1200 ? 700 : 100).replace(/\s+/g, " "));
         return null;
@@ -360,7 +398,7 @@ function doHome() {
                 videos.push(mkVideo("ch_" + ckey, "[TV] " + (it.nombre || "Canal"), it.logo || "", "pj://channel/" + ckey, "TV en Vivo", true));
             } else if (it.slug) {
                 var type = (it.tipo === "serie") ? "serie" : "movie";
-                videos.push(mkVideo(type + "_" + it.slug, (type === "serie" ? "[Serie] " : "") + (it.titulo || it.nombre || ""), fixImg(it.img_frente || it.poster), "pj://" + type + "/" + it.slug, "Pelisjuanita"));
+                videos.push(mkItem(type, it.slug, (it.titulo || it.nombre || ""), fixImg(it.img_frente || it.poster)));
             }
         }
     }
@@ -376,7 +414,7 @@ function doSearch(query) {
     for (var i = 0; i < list.length && videos.length < 40; i++) {
         var it = list[i];
         var tipo = (it.tipo === "serie") ? "serie" : "movie";
-        videos.push(mkVideo(tipo + "_" + (it.slug || it.id), (tipo === "serie" ? "[Serie] " : "") + (it.titulo_principal || it.titulo || it.nombre || ""), fixImg(it.img_frente), "pj://" + tipo + "/" + (it.slug || ""), "Pelisjuanita"));
+        videos.push(mkItem(tipo, (it.slug || it.id), (it.titulo_principal || it.titulo || it.nombre || ""), fixImg(it.img_frente)));
     }
     return videos;
 }
@@ -404,6 +442,26 @@ function resolveSources(servidores) {
     return sources;
 }
 
+function getEpisodes(slug) {
+    var sdata = apiGet("/series.php?slug=" + encodeURIComponent(slug));
+    var info = sdata ? (sdata.episodio || sdata.datos || sdata.serie || null) : null;
+    if (!info) return { info: null, videos: [] };
+    var total = parseInt(info.temporadas, 10) || 1;
+    var vids = [], name = info.nombre || slug, thumb = fixImg(info.img_frente);
+    for (var t = 1; t <= total && t <= 30; t++) {
+        var f = apiGet("/series.php?slug=" + encodeURIComponent(slug) + "&t=" + t);
+        if (!f) continue;
+        var eps = Array.isArray(f.episodios) ? f.episodios : (Array.isArray(f.datos) ? f.datos : []);
+        for (var i = 0; i < eps.length; i++) {
+            var y = eps[i];
+            var n = (y.enum !== undefined && y.enum !== null) ? y.enum : ((y.e !== undefined && y.e !== null) ? y.e : i + 1);
+            var title = "T" + t + "E" + n + " · " + (y.titulo || y.title || ("Capítulo " + n));
+            vids.push(mkVideo("e_" + slug + "_" + t + "_" + n, title, thumb, "pj://ep/" + slug + "/" + t + "/" + n, name));
+        }
+    }
+    return { info: info, videos: vids };
+}
+
 function doDetails(url) {
     _debugLog = "";
     if (!url) return mkDetail("", "Sin URL", "", "", [], "");
@@ -414,7 +472,7 @@ function doDetails(url) {
         var data = apiGet("/movies.php?slug=" + encodeURIComponent(slug));
         if (!data || !data.datos) return mkDetail("m_" + slug, "No encontrado", "", url, [], "");
         var d = data.datos;
-        var servidores = decryptServidores(d.servidores);
+        var servidores = parseServidores(d.servidores);
         var sources = resolveSources(servidores);
         var desc = (d.sinopsis || "") + "\n\nAño: " + (d.año || "") + "\nGénero: " + (d.genero || "");
         if (sources.length === 0) {
@@ -443,15 +501,23 @@ function doDetails(url) {
         return mkDetail("ch_" + ckey, ch.nombre || ckey, ch.logo || "", url, csrc, "TV en vivo", true);
     }
 
+    var ep = url.match(/pj:\/\/ep\/([^\/]+)\/(\d+)\/(\d+)/);
+    if (ep) {
+        var eslug = ep[1], et = ep[2], en = ep[3];
+        var edata = apiGet("/series.php?slug=" + encodeURIComponent(eslug) + "&t=" + et + "&e=" + en);
+        if (!edata) throw new ScriptException("Sin respuesta del episodio T" + et + "E" + en);
+        var esources = resolveSources(parseServidores(edata.servidores));
+        if (esources.length === 0) throw new ScriptException("SIN FUENTES\n" + _debugLog);
+        return mkDetail("e_" + eslug + "_" + et + "_" + en, eslug + " T" + et + "E" + en, "", url, esources, "", false);
+    }
+
     var s = url.match(/pj:\/\/serie\/([^\/]+)/);
     if (s) {
         var sslug = s[1];
         var sdata = apiGet("/series.php?slug=" + encodeURIComponent(sslug));
         if (!sdata || !sdata.datos) return mkDetail("s_" + sslug, "No encontrado", "", url, [], "");
         var sd = sdata.datos;
-        // TEMPORAL: mostrar la estructura real de la serie para poder implementar episodios
-        throw new ScriptException("SERIE top=" + Object.keys(sdata).join(",") + " datos=" + Object.keys(sd).join(",") +
-            "\n" + JSON.stringify(sd).substring(0, 1500));
+        throw new ScriptException("Las series se abren como lista de reproducción (episodios).");
     }
 
     return mkDetail("", "No soportado", "", url, [], "");
@@ -490,7 +556,21 @@ if (typeof source !== "undefined") {
         catch (e) { return new VideoPager([], false, null); }
     };
 
-    source.isContentDetailsUrl = function(url) { return url && url.indexOf("pj://") === 0; };
+    source.isContentDetailsUrl = function(url) { return !!url && url.indexOf("pj://") === 0 && url.indexOf("pj://serie/") !== 0; };
+    source.isPlaylistUrl = function(url) { return !!url && url.indexOf("pj://serie/") === 0; };
+    source.getPlaylist = function(url) {
+        var slug = url.match(/pj:\/\/serie\/([^\/]+)/)[1];
+        var r = getEpisodes(slug);
+        if (!r.info) throw new ScriptException("Serie no encontrada: " + slug);
+        return new PlatformPlaylistDetails({
+            id: new PlatformID("Pelisjuanita", "s_" + slug, PID),
+            name: r.info.nombre || slug,
+            thumbnail: fixImg(r.info.img_frente),
+            author: new PlatformAuthorLink(PPID, "Pelisjuanita", "https://pelisjuanita.com", "", 0),
+            datetime: 0, url: url, videoCount: r.videos.length,
+            contents: new VideoPager(r.videos, false, null)
+        });
+    };
     source.isVideoDetailsUrl = function(url) { return source.isContentDetailsUrl(url); };
 
     source.getContentDetails = function(url) {
