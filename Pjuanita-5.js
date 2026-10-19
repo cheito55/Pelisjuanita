@@ -256,8 +256,8 @@ function extractVideo(pageUrl) {
 
     if (isSeriesPlayerHost(host)) return seriesPlayerExtract(pageUrl);
     if (host.indexOf("ok.ru") !== -1 || host.indexOf("odnoklassniki") !== -1) return okExtract(pageUrl);
-    if (host.indexOf("voe") !== -1) return voeExtract(pageUrl);
-    if (host.indexOf("dood") !== -1 || host.indexOf("do7go") !== -1) return doodExtract(pageUrl);
+    if (/voe|prowd/i.test(host)) return voeExtract(pageUrl);
+    if (/dood|do7|ds2|d0|ds0/i.test(host)) return doodExtract(pageUrl);
     return genericExtract(pageUrl);
 }
 
@@ -447,7 +447,8 @@ var _spCache = {};
 var JUANITA_ALIASES = {
     "the fresh prince of bel air": "el-principe-del-rap-en-bel-air",
     "el principe del rap de bel air": "el-principe-del-rap-en-bel-air",
-    "el principe del rap en bel air": "el-principe-del-rap-en-bel-air"
+    "el principe del rap en bel air": "el-principe-del-rap-en-bel-air",
+    "vaiana 2": "moana-2"
 };
 
 function isSeriesPlayerHost(host) { return SP_HOSTS.test(host || ""); }
@@ -534,6 +535,7 @@ function parseJuanitaWeb(html) {
     function add(u, lang, name) {
         u = cleanUrl(String(u || "").replace(/&amp;/g, "&"));
         if (u.indexOf("//") === 0) u = "https:" + u;
+        else if (u.indexOf("/") === 0) u = JUANITA_WEB + u; // Arregla iframes relativos
         if (!/^https?:\/\//i.test(u) || seen[u]) return;
         seen[u] = 1;
         out.push({ url: u, audio: lang || "", server_name: name || "Web" });
@@ -586,7 +588,7 @@ function juanitaWebServers(isTv, slug, t, e) {
         JUANITA_WEB + (isTv ? "/series/search?s=" : "/movies/search?s=") + encodeURIComponent(words.join(" ")),
         { "Referer": JUANITA_WEB + "/" });
     if (body) {
-        var re = isTv ? /\/series\/ver-serie\/([a-z0-9\-]+)/gi : /(?:\/movies\/(?:pelicula|movie)\/|movieInfo\.php\?title=)([a-z0-9\-]+)/gi, m, n = 0;
+        var re = isTv ? /\/series\/(?:ver-serie|serie)\/([a-z0-9\-]+)/gi : /(?:\/movies\/(?:pelicula|movie|ver)\/|movieInfo\.php\?title=)([a-z0-9\-]+)/gi, m, n = 0;
         while ((m = re.exec(body)) !== null && n < 2) {
             var cand = m[1];
             if (tried[cand]) continue;
@@ -657,9 +659,9 @@ function doSearch(query) {
     return videos;
 }
 
-// Hosts sin extractor funcional: se saltean para no perder tiempo (cada intento es una petición lenta)
-var SKIP_HOSTS = ["vimeus.com", "bysesukior.com", "filemoon"];
-var MAX_SOURCES = 6;
+// Modificado: Eliminamos Filemoon y Vimeus de SKIP_HOSTS para que el genericExtract los descifre
+var SKIP_HOSTS = [];
+var MAX_SOURCES = 8; // Aumentado para que capture más
 
 function hostOf(url) {
     try { return url.match(/^https?:\/\/([^\/]+)/i)[1].toLowerCase(); } catch (e) { return ""; }
@@ -830,17 +832,30 @@ function doDetails(url) {
         if (!ch) { doHome(); ch = _channels[ckey]; } // si se abrió sin pasar por el home
         if (!ch) throw new ScriptException("Canal no encontrado: " + ckey + "\n" + _debugLog);
         var csrc = [];
-        if (ch.m3u8) csrc.push(mkHls(cleanUrl(ch.m3u8), "Directo"));
         
-        // MODIFICADO: Añadido requestModifier con las cabeceras requeridas para saltar bloqueos
+        var reqMod = {
+            headers: { 
+                "Referer": "https://pelisjuanita.com/", 
+                "Origin": "https://pelisjuanita.com",
+                "User-Agent": UA 
+            }
+        };
+
+        if (ch.m3u8) {
+            csrc.push(new HLSSource({
+                name: "Directo",
+                url: cleanUrl(ch.m3u8),
+                duration: 0,
+                requestModifier: reqMod
+            }));
+        }
+        
         if (ch.dash && typeof DashSource !== "undefined") {
             csrc.push(new DashSource({
                 name: "DASH",
                 url: cleanUrl(ch.dash),
                 duration: 0,
-                requestModifier: {
-                    headers: { "Referer": "https://pelisjuanita.com/", "User-Agent": UA }
-                }
+                requestModifier: reqMod
             }));
         }
         
