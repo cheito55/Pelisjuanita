@@ -390,12 +390,16 @@ function genericExtract(pageUrl, depth) {
             _jsProbed = true;
             var jsUrl = pageUrl.match(/^(https?:\/\/[^\/]+)/i)[1] + js[1];
             var jsTxt = httpGet(jsUrl, { "Referer": pageUrl });
-            var apis = [], am, are = /["'`](\/(?:api|ajax|get|embed|source|player|stream)[^"'`\s]{0,80})["'`]/gi;
-            while ((am = are.exec(jsTxt)) !== null && apis.length < 8) apis.push(am[1]);
-            addDebug("[generic] js=" + jsUrl + " len=" + jsTxt.length + " rutas=" + apis.join(" | "));
+            var hits = [], fm, fre = /(?:fetch|axios\.get|axios\.post|\.open)\s*\(([^)]{0,90})/g;
+            while ((fm = fre.exec(jsTxt)) !== null && hits.length < 5) hits.push(fm[1].replace(/\s+/g, " "));
+            var urls = [], um, ure = /https?:\/\/[a-z0-9.-]+\.[a-z]{2,}[^"'`\s\\)]{0,60}/gi;
+            while ((um = ure.exec(jsTxt)) !== null && urls.length < 6) {
+                if (!/cloudflare|w3\.org|reactjs|github/i.test(um[0]) && urls.indexOf(um[0]) === -1) urls.push(um[0]);
+            }
+            addDebug("[generic] js=" + jsUrl + " len=" + jsTxt.length + " fetch=" + hits.join(" ; ") + " urls=" + urls.join(" ; "));
         }
         addDebug("[generic] sin m3u8 ni packed. len=" + html.length + " html=" +
-            html.substring(0, html.length < 1200 ? 700 : 100).replace(/\s+/g, " "));
+            html.substring(0, html.length < 1200 ? 160 : 100).replace(/\s+/g, " "));
         return null;
     } catch (e) {
         addDebug("[generic] error: " + e);
@@ -474,14 +478,18 @@ function resolveSources(servidores) {
     var sources = [];
     if (!servidores || !servidores.length) return sources;
 
-    var list = [];
+    var list = [], skipped = [], skippedHosts = {};
     for (var i = 0; i < servidores.length; i++) {
         var srv = servidores[i];
         var url = cleanUrl(srv.url || srv.link || "");
         if (!url) continue;
         var host = hostOf(url), skip = false;
         for (var k = 0; k < SKIP_HOSTS.length; k++) if (host.indexOf(SKIP_HOSTS[k]) !== -1) skip = true;
-        if (skip) { addDebug("[resolve] salteado (sin extractor): " + host); continue; }
+        if (skip) {
+            addDebug("[resolve] salteado (sin extractor): " + host);
+            if (!skippedHosts[host]) { skippedHosts[host] = true; skipped.push(url); }
+            continue;
+        }
         list.push({ srv: srv, url: url, pr: hostPriority(host), idx: i });
     }
     list.sort(function (a, b) { return (a.pr - b.pr) || (a.idx - b.idx); });
@@ -503,6 +511,15 @@ function resolveSources(servidores) {
             ? new VideoUrlSource({ name: name, url: hls, container: "video/mp4", width: 0, height: 0, duration: 0, codec: "" })
             : mkHls(hls, name);
         if (src) { sources.push(src); addDebug("[resolve] OK: " + name); }
+    }
+
+    // Diagnóstico: si no hubo ninguna fuente, inspeccionar los hosts salteados para ver cómo cargan
+    if (sources.length === 0) {
+        for (var d = 0; d < skipped.length && d < 2; d++) {
+            _jsProbed = false;
+            addDebug("[diag] " + skipped[d].substring(0, 90));
+            extractVideo(skipped[d]);
+        }
     }
     return sources;
 }
