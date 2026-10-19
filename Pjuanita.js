@@ -232,8 +232,24 @@ function voeExtract(pageUrl) {
     } catch (e) { return null; }
 }
 
+function doodPassMd5(pageUrl) {
+    var origin = pageUrl.match(/^(https?:\/\/[^\/]+)/i)[1];
+    var html = httpGet(pageUrl, { "Referer": pageUrl });
+    if (!html) return null;
+    var pm = html.match(/\/pass_md5\/[^'"\s]+/);
+    if (!pm) { addDebug("[dood] sin pass_md5, len=" + html.length); return null; }
+    var tk = pm[0].split("/").pop();
+    var base = httpGet(origin + pm[0], { "Referer": pageUrl });
+    if (!base || base.indexOf("http") !== 0) { addDebug("[dood] respuesta pass_md5 rara"); return null; }
+    var chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789", rnd = "";
+    for (var i = 0; i < 10; i++) rnd += chars.charAt(Math.floor(Math.random() * chars.length));
+    return base + rnd + "?token=" + tk + "&expiry=" + Date.now();
+}
+
 function doodExtract(pageUrl) {
     try {
+        var pm = doodPassMd5(pageUrl);
+        if (pm) return pm;
         var html = httpGet(pageUrl, { "Referer": pageUrl });
         if (!html) return null;
         var m = html.match(/(?:file|link|source)\s*[:=]\s*['"]([^'"]+\.m3u8[^'"]*)['"]/i);
@@ -279,7 +295,7 @@ function findStreamIn(text, pageUrl) {
     return null;
 }
 
-function genericExtract(pageUrl) {
+function genericExtract(pageUrl, depth) {
     try {
         var html = httpGet(pageUrl, { "Referer": pageUrl });
         if (!html) { addDebug("[generic] html vacío"); return null; }
@@ -300,7 +316,20 @@ function genericExtract(pageUrl) {
             return null;
         }
 
-        addDebug("[generic] sin m3u8 ni packed. len=" + html.length + " inicio=" + html.substring(0, 100).replace(/\s+/g, " "));
+        var rd = html.match(/(?:location(?:\.href)?\s*=|location\.replace\()\s*["']([^"']+)["']/i) ||
+                 html.match(/http-equiv=["']refresh["'][^>]*url=([^"'>\s]+)/i) ||
+                 html.match(/<iframe[^>]+src=["']([^"']+)["']/i);
+        if (rd && (depth || 0) < 2) {
+            var next = rd[1].replace(/&amp;/g, "&");
+            if (next.indexOf("//") === 0) next = "https:" + next;
+            else if (next.charAt(0) === "/") next = pageUrl.match(/^(https?:\/\/[^\/]+)/i)[1] + next;
+            if (/^https?:\/\//i.test(next)) {
+                addDebug("[generic] siguiendo redirect -> " + next);
+                return genericExtract(next, (depth || 0) + 1);
+            }
+        }
+        addDebug("[generic] sin m3u8 ni packed. len=" + html.length + " html=" +
+            html.substring(0, html.length < 1200 ? 700 : 100).replace(/\s+/g, " "));
         return null;
     } catch (e) {
         addDebug("[generic] error: " + e);
@@ -364,7 +393,10 @@ function resolveSources(servidores) {
         addDebug("[resolve] probando " + name);
         var hls = extractVideo(url);
         if (hls) {
-            var src = mkHls(hls, name);
+            var isMp4 = !isM3u8Url(hls) && (hls.indexOf(".mp4") !== -1 || hls.indexOf("token=") !== -1);
+            var src = isMp4
+                ? new VideoUrlSource({ name: name, url: hls, container: "video/mp4", width: 0, height: 0, duration: 0, codec: "" })
+                : mkHls(hls, name);
             if (src) sources.push(src);
             addDebug("[resolve] OK: " + name);
         }
@@ -417,7 +449,9 @@ function doDetails(url) {
         var sdata = apiGet("/series.php?slug=" + encodeURIComponent(sslug));
         if (!sdata || !sdata.datos) return mkDetail("s_" + sslug, "No encontrado", "", url, [], "");
         var sd = sdata.datos;
-        return mkDetail("s_" + sslug, sd.nombre || sslug, fixImg(sd.img_frente), url, [], (sd.sinopsis || "") + "\n\n(Episodios: pendiente de implementar)");
+        // TEMPORAL: mostrar la estructura real de la serie para poder implementar episodios
+        throw new ScriptException("SERIE top=" + Object.keys(sdata).join(",") + " datos=" + Object.keys(sd).join(",") +
+            "\n" + JSON.stringify(sd).substring(0, 1500));
     }
 
     return mkDetail("", "No soportado", "", url, [], "");
@@ -467,5 +501,17 @@ if (typeof source !== "undefined") {
     source.getVideoDetails = function(url) { return source.getContentDetails(url); };
     source.getContentRecommendations = function(url) { return new VideoPager([], false, null); };
     source.searchSuggestions = function(q) { return []; };
-    source.isChannelUrl = function(url) { return false; };
+    source.isChannelUrl = function(url) {
+        return !!url && /^https?:\/\/(www\.)?pelisjuanita\.com\/?$/i.test(url);
+    };
+    source.getChannel = function(url) {
+        return new PlatformChannel({
+            id: PPID, name: "Pelisjuanita", thumbnail: "", banner: "", subscribers: 0,
+            description: "Pelisjuanita", url: "https://pelisjuanita.com", links: {}
+        });
+    };
+    source.getChannelContents = function(url) {
+        try { return new VideoPager(doHome(), false, null); }
+        catch (e) { return new VideoPager([], false, null); }
+    };
 }
