@@ -24,8 +24,16 @@ function addDebug(msg) { _debugLog += String(msg) + "\n"; }
 
 function httpGet(url, headers) {
     try {
-        var h = headers || {};
-        if (!h["User-Agent"]) h["User-Agent"] = UA;
+        var h = {};
+        // Encabezados de navegador: algunas páginas de servidores responden 403
+        // si GrayJay solo envía User-Agent y Referer.
+        h["User-Agent"] = UA;
+        h["Accept"] = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8";
+        h["Accept-Language"] = "es-AR,es;q=0.9,en-US;q=0.7,en;q=0.6";
+        h["Cache-Control"] = "no-cache";
+        h["Pragma"] = "no-cache";
+        var supplied = headers || {};
+        for (var hk in supplied) if (Object.prototype.hasOwnProperty.call(supplied, hk)) h[hk] = supplied[hk];
         var r = http.GET(url, h);
         _lastUrl = (r && r.url) ? r.url : url;
         if (!r || !r.body) {
@@ -257,6 +265,12 @@ function extractVideo(pageUrl) {
 
     if (isSeriesPlayerHost(host)) return seriesPlayerExtract(pageUrl);
     if (host.indexOf("ok.ru") !== -1 || host.indexOf("odnoklassniki") !== -1) return okExtract(pageUrl);
+    // Dood suele publicar espejos con dominios que no contienen la palabra "dood".
+    // Sus rutas /e/ID, /d/ID o /i/ID usan el mismo mecanismo pass_md5.
+    if (/\/(?:e|d|i)\/[A-Za-z0-9_-]{5,}(?:\/|$|[?#])/i.test(pageUrl)) {
+        var doodMirror = doodExtract(pageUrl);
+        if (doodMirror) return doodMirror;
+    }
     if (host.indexOf("voe") !== -1) return voeExtract(pageUrl);
     if (host.indexOf("dood") !== -1 || host.indexOf("do7go") !== -1) return doodExtract(pageUrl);
     return genericExtract(pageUrl);
@@ -353,7 +367,8 @@ function findStreamIn(text, pageUrl) {
         if (u.charAt(0) === "/") return origin + u;
         return u;
     }
-    var m, re = /["'](?:hls\d*|file|src|source|url|video_url)["']\s*:\s*["']([^"']+)["']/gi, found = [];
+    text = String(text || "").replace(/\\u0026/gi, "&").replace(/\\u002[fF]/g, "/").replace(/\\u003[aA]/g, ":").replace(/\\u003[fF]/g, "?").replace(/\\u003[dD]/g, "=").replace(/\\\//g, "/");
+    var m, re = /["'](?:hls\d*|file|src|source|url|video_url|playlist|hls|mp4)["']\s*:\s*["']([^"']+)["']/gi, found = [];
     while ((m = re.exec(text)) !== null) {
         var candidate = abs(m[1].replace(/\\u0026/gi, "&").replace(/\\\//g, "/"));
         if (/\.m3u8(?:[?#]|$)/i.test(candidate) || /\.mp4(?:[?#]|$)/i.test(candidate)) found.push(candidate);
@@ -372,18 +387,20 @@ function genericExtract(pageUrl, depth) {
         var hit = findStreamIn(html, pageUrl);
         if (hit) return hit;
 
-        var idx = html.indexOf("eval(function(p,a,c,k,e,d)");
-        if (idx !== -1) {
-            var unpacked = unpackJs(html.substring(idx));
+        var packedRe = /eval\(function\(p,a,c,k,e,d\)/g, packedMatch, packedCount = 0;
+        while ((packedMatch = packedRe.exec(html)) !== null && packedCount < 8) {
+            packedCount++;
+            var packedStart = packedMatch.index;
+            var packedEnd = html.indexOf("</script>", packedStart);
+            if (packedEnd < 0) packedEnd = Math.min(html.length, packedStart + 90000);
+            var packedBlock = html.substring(packedStart, packedEnd);
+            var unpacked = unpackJs(packedBlock);
             if (unpacked) {
                 hit = findStreamIn(unpacked, pageUrl);
-                if (hit) return hit;
-                addDebug("[generic] desempaquetado sin stream: " + unpacked.substring(0, 120).replace(/\s+/g, " "));
-                return null;
+                if (hit) { addDebug("[generic] stream en packed #" + packedCount); return hit; }
             }
-            addDebug("[generic] packed JS no se pudo desempaquetar");
-            return null;
         }
+        if (packedCount) addDebug("[generic] packed revisados=" + packedCount + ", sin stream directo");
 
         var rd = html.match(/(?:location(?:\.href)?\s*=|location\.replace\()\s*["']([^"']+)["']/i) ||
                  html.match(/http-equiv=["']refresh["'][^>]*url=([^"'>\s]+)/i) ||
