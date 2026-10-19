@@ -77,62 +77,9 @@ function mkItem(type, slug, title, thumb) {
     return mkVideo(type + "_" + slug, title, thumb, "pj://" + type + "/" + slug, "Pelisjuanita");
 }
 
-function liveRequestModifier(ref) {
-    ref = ref || "https://pelisjuanita.com/";
-    var origin = "";
-    try { origin = String(ref).match(/^(https?:\/\/[^\/?#]+)/i)[1]; } catch (e) {}
-    var baseHeaders = { "User-Agent": UA, "Referer": ref };
-    if (origin) baseHeaders["Origin"] = origin;
-    return {
-        allowByteSkip: true,
-        headers: baseHeaders,
-        modifyRequest: function (url, headers) {
-            var h = headers || {}, k;
-            for (k in baseHeaders) if (baseHeaders.hasOwnProperty(k) && !h[k]) h[k] = baseHeaders[k];
-            return { url: url, headers: h };
-        }
-    };
-}
-
-function mkHls(url, name, ref) {
+function mkHls(url, name) {
     if (!url) return null;
-    var u = cleanUrl(url);
-    var opts = { name: name || "HLS", url: u, duration: 0 };
-    opts.requestModifier = liveRequestModifier(ref);
-    try { return new HLSSource(opts); }
-    catch (e) { addDebug("[live] no se pudo crear HLS: " + e); return null; }
-}
-
-function mkDash(url, name, ref) {
-    if (!url || typeof DashSource === "undefined") return null;
-    var u = cleanUrl(url);
-    var opts = { name: name || "DASH", url: u, duration: 0 };
-    opts.requestModifier = liveRequestModifier(ref);
-    try { return new DashSource(opts); }
-    catch (e) { addDebug("[live] no se pudo crear DASH: " + e); return null; }
-}
-
-
-// Diagnóstico no invasivo del manifiesto DASH: no modifica ni descifra el flujo.
-function probeLiveManifest(url, ref) {
-    if (!url) return;
-    try {
-        var headers = liveRequestModifier(ref || "https://pelisjuanita.com/").headers;
-        headers["Accept"] = "application/dash+xml,application/xml,text/xml,*/*";
-        var r = http.GET(url, headers);
-        if (!r) { addDebug("[live-probe] DASH sin respuesta HTTP"); return; }
-        var body = String(r.body || "");
-        var ct = "";
-        try { ct = String((r.headers && (r.headers["content-type"] || r.headers["Content-Type"])) || ""); } catch (e0) {}
-        addDebug("[live-probe] HTTP=" + String(r.code || "?") + " type=" + (ct || "?") + " bytes=" + body.length);
-        addDebug("[live-probe] url_final=" + String(r.url || url).substring(0, 180));
-        if (body) {
-            addDebug("[live-probe] MPD=" + (/\<MPD(?:\s|>)/i.test(body) ? "sí" : "no reconocido"));
-            addDebug("[live-probe] ContentProtection=" + (/ContentProtection|widevine|playready|clearkey/i.test(body) ? "detectado" : "no detectado"));
-            addDebug("[live-probe] SegmentTemplate=" + (/SegmentTemplate/i.test(body) ? "sí" : "no") + " BaseURL=" + (/BaseURL/i.test(body) ? "sí" : "no"));
-            if (!/\<MPD(?:\s|>)/i.test(body)) addDebug("[live-probe] inicio=" + body.substring(0, 100).replace(/[\r\n\t]+/g, " "));
-        }
-    } catch (e) { addDebug("[live-probe] excepción HTTP: " + String(e).substring(0, 180)); }
+    return new HLSSource({ name: name || "HLS", url: url, duration: 0 });
 }
 
 function cleanUrl(url) {
@@ -307,28 +254,10 @@ function extractVideo(pageUrl) {
     var host = "";
     try { host = pageUrl.match(/^https?:\/\/([^\/]+)/i)[1].toLowerCase(); } catch (e) {}
 
-
     if (isSeriesPlayerHost(host)) return seriesPlayerExtract(pageUrl);
-    if (host.indexOf("ok.ru") !== -1 || host.indexOf("odnoklassniki") !== -1) {
-        var ok = okExtract(pageUrl);
-        if (ok) return ok;
-        addDebug("[ok] extractor específico falló; probando genérico");
-        return genericExtract(pageUrl);
-    }
-    if (host.indexOf("voe") !== -1) {
-        var voe = voeExtract(pageUrl);
-        if (voe) return voe;
-        addDebug("[voe] extractor específico falló; probando genérico");
-        return genericExtract(pageUrl);
-    }
-    if (host.indexOf("dood") !== -1 || host.indexOf("do7go") !== -1 || host.indexOf("ds2") !== -1) {
-        var dood = doodExtract(pageUrl);
-        if (dood) return dood;
-        addDebug("[dood] extractor específico falló; probando genérico");
-        return genericExtract(pageUrl);
-    }
-    // Los demás hosts (Filemoon, Mixdrop, Streamtape, Uqload, Vimeus,
-    // Goodstream, Nuupload, etc.) pasan por el extractor genérico y sus fallbacks.
+    if (host.indexOf("ok.ru") !== -1 || host.indexOf("odnoklassniki") !== -1) return okExtract(pageUrl);
+    if (host.indexOf("voe") !== -1) return voeExtract(pageUrl);
+    if (host.indexOf("dood") !== -1 || host.indexOf("do7go") !== -1) return doodExtract(pageUrl);
     return genericExtract(pageUrl);
 }
 
@@ -507,9 +436,6 @@ function genericExtract(pageUrl, depth) {
 }
 
 // ========== SERIESPLAYER + WEB DE JUANITA (portado de PelisHub) ==========
-// En series (ej. El Principe del rap de Bel-Air) los servidores son reproductores
-// "seriesplayer.fortamomar.workers.dev/?id=..." que hay que pedir con el id re-codificado,
-// Referer de pelisjuanita.com y buscar el .m3u8 dinamico dentro del HTML.
 
 var JUANITA_WEB = "https://pelisjuanita.com";
 var SP_HOSTS = /fortamomar|seriesplayer\.|onfilom\.com|playspelis\.com|321moviesfree\.com|flixlat\.com/i;
@@ -539,7 +465,6 @@ function normalizeMediaText(t) {
         .replace(/&quot;/gi, '"').replace(/&#39;/gi, "'");
 }
 
-// Re-codifica el parametro id (puede traer espacios, %2F, etc.) como lo hace PelisHub
 function encodePlayerUrl(url) {
     url = String(url || "").replace(/&amp;/g, "&");
     var m = /^(https?:\/\/[^?]+\?id=)(.+)$/i.exec(url);
@@ -622,16 +547,18 @@ function parseJuanitaWeb(html) {
         if (!/^https?:|^\/\//i.test(u)) { var d = webB64(u); if (/^https?:\/\//i.test(d)) u = d; }
         add(u, a["data-idioma"] || "", "Web");
     }
-    re = /https?:\/\/(?:seriesplayer\.)?fortamomar\.workers\.dev\/\?id=[^\s"'<>]*/gi;
+    re = /https?:\/\/(?:seriesplayer\.)?fortamomar\.workers\.dev\/\?id=[^\s"'<>]+/gi;
     while ((m = re.exec(html)) !== null) add(m[0], "Latino", "SeriesPlayer");
-    re = /https?:\/\/seriesplayer\.[a-z0-9._-]+\/\?id=[^\s"'<>]*/gi;
+    re = /https?:\/\/seriesplayer\.[a-z0-9._-]+\/\?id=[^\s"'<>]+/gi;
     while ((m = re.exec(html)) !== null) add(m[0], "Latino", "SeriesPlayer");
     re = /(?:data-url|href|src)=["']([^"']*fortamomar[^"']*|[^"']*seriesplayer[^"']*)["']/gi;
     while ((m = re.exec(html)) !== null) add(m[1], "Latino", "SeriesPlayer");
     tags = html.match(/<iframe\b[^>]*>/gi) || [];
     for (i = 0; i < tags.length; i++) {
         var a2 = attrsOf(tags[i]), src = a2["src"] || a2["data-src"] || "";
-        if (/fortamomar|seriesplayer|onfilom|playspelis|flixlat/i.test(src)) add(src, "Latino", "SeriesPlayer");
+        if (src && !/youtube|facebook/i.test(src)) {
+            add(src, "Latino", "Servidor Web");
+        }
     }
     return out;
 }
@@ -730,15 +657,9 @@ function doSearch(query) {
     return videos;
 }
 
-// Servidores adicionales: ya no se descartan dominios completos antes de intentar
-// el extractor genérico. Si un servidor falla, resolveSources continúa con el siguiente.
-// Se mantiene un límite moderado para no demorar excesivamente cada película.
-var SKIP_HOSTS = [];
-var MAX_SOURCES = 5;
-
-// Familias conocidas del segundo JS. No se hace scraping de catálogo adicional:
-// solo se priorizan/interpretan enlaces de servidores que ya entrega la ficha.
-var EXTRA_HOST_FAMILIES = /streamwish|hlswish|wishembed|awish|vidhide|filemoon|filelions|mixdrop|mxdrop|supervideo|voe|uqload|streamtape|dood|do7go|ok\.ru|odnoklassniki|vimeus|goodstream|nupload|nuuuppp|dailymotion|odysee|archive\.org|vkvideo|vk\.com|vidmoly|vidguard|vidsrc|vidplay|vidlink|vidnest|vidrock|vidsonic|vixsrc|vixcloud|lulustream|luluvdo|plusvip|fastream|esplay/i;
+// Hosts sin extractor funcional: se saltean para no perder tiempo (cada intento es una petición lenta)
+var SKIP_HOSTS = ["vimeus.com", "bysesukior.com", "filemoon"];
+var MAX_SOURCES = 6;
 
 function hostOf(url) {
     try { return url.match(/^https?:\/\/([^\/]+)/i)[1].toLowerCase(); } catch (e) { return ""; }
@@ -748,10 +669,8 @@ function hostOf(url) {
 function hostPriority(host) {
     if (isSeriesPlayerHost(host)) return -1;
     if (host.indexOf("ok.ru") !== -1) return 0;
-    if (/wish|vidhide|callistanise|vibuxer|morencius|lulustream|filemoon|filelions|mixdrop|supervideo/.test(host)) return 1;
-    if (host.indexOf("ok.ru") !== -1 || /odnoklassniki/.test(host)) return 1;
-    if (/dood|do7go|ds2|voe|uqload|streamtape|vidmoly|vidguard|vidplay|vidlink/.test(host)) return 2;
-    if (EXTRA_HOST_FAMILIES.test(host)) return 2;
+    if (/wish|vidhide|callistanise|vibuxer|morencius|lulustream/.test(host)) return 1;
+    if (host.indexOf("dood") !== -1 || host.indexOf("do7go") !== -1 || host.indexOf("ds2") !== -1) return 2;
     return 3;
 }
 
@@ -825,8 +744,7 @@ function resolveSources(servidores) {
         var name = (sv.server_name || sv["server-name"] || sv.ServerName || sv.nombre || "Servidor") + " [" + (sv.audio || sv.idioma || "") + "]";
         var h = hostOf(it.url);
         if (_hostFail[h]) { addDebug("[resolve] salteado (ya falló): " + h); continue; }
-        addDebug("[resolve] probando " + name + " host=" + h);
-        if (EXTRA_HOST_FAMILIES.test(h)) addDebug("[resolve] familia extra detectada: " + h);
+        addDebug("[resolve] probando " + name);
         _refOverride = "";
         var hls = extractVideo(it.url);
         if (!hls) {
@@ -912,25 +830,24 @@ function doDetails(url) {
         if (!ch) { doHome(); ch = _channels[ckey]; } // si se abrió sin pasar por el home
         if (!ch) throw new ScriptException("Canal no encontrado: " + ckey + "\n" + _debugLog);
         var csrc = [];
-        var liveRef = "https://pelisjuanita.com/";
-        var hlsUrl = cleanUrl(ch.m3u8 || "");
-        var dashUrl = cleanUrl(ch.dash || "");
-        // Solo inspecciona el manifiesto para diagnosticar acceso/formato; no altera el directo.
-        if (dashUrl) probeLiveManifest(dashUrl, liveRef);
-        if (hlsUrl) {
-            var hs = mkHls(hlsUrl, "Directo · HLS", liveRef);
-            if (hs) csrc.push(hs);
+        if (ch.m3u8) csrc.push(mkHls(cleanUrl(ch.m3u8), "Directo"));
+        
+        // MODIFICADO: Añadido requestModifier con las cabeceras requeridas para saltar bloqueos
+        if (ch.dash && typeof DashSource !== "undefined") {
+            csrc.push(new DashSource({
+                name: "DASH",
+                url: cleanUrl(ch.dash),
+                duration: 0,
+                requestModifier: {
+                    headers: { "Referer": "https://pelisjuanita.com/", "User-Agent": UA }
+                }
+            }));
         }
-        if (dashUrl) {
-            var ds = mkDash(dashUrl, "Directo · DASH", liveRef);
-            if (ds) csrc.push(ds);
-        }
+        
+        if (!csrc.length) throw new ScriptException("Canal sin m3u8/dash. Datos: " + JSON.stringify(ch).substring(0, 400));
         addDebug("[canal] campos=" + Object.keys(ch).join(","));
-        addDebug("[canal] m3u8=" + (hlsUrl || "-"));
-        addDebug("[canal] dash=" + (dashUrl || "-"));
-        addDebug("[canal] fuentes_creadas=" + csrc.length);
-        addDebug("[canal] referer=" + liveRef + " (User-Agent/Origin configurados)");
-        if (!csrc.length) throw new ScriptException("Canal sin fuente reproducible en GrayJay (HLS/DASH). Datos: " + JSON.stringify(ch).substring(0, 400) + "\n" + _debugLog);
+        addDebug("[canal] m3u8=" + (ch.m3u8 || "-"));
+        addDebug("[canal] dash=" + (ch.dash || "-"));
         return mkDetail("ch_" + ckey, ch.nombre || ckey, ch.logo || "", url, csrc, "TV en vivo", true);
     }
 
@@ -971,9 +888,6 @@ function mkDetail(id, name, thumb, url, sources, description, isLive) {
         author: new PlatformAuthorLink(PPID, "Pelisjuanita", "https://pelisjuanita.com", "", 0),
         uploadDate: 0, url: url, duration: 0, viewCount: 0, isLive: !!isLive,
         video: new VideoSourceDescriptor(valid),
-        // GrayJay requiere la propiedad live para tratar la fuente como directo.
-        // Mantener video también permite conservar el descriptor habitual.
-        live: (isLive && valid.length) ? valid[0] : null,
         description: desc
     });
 }
