@@ -805,38 +805,74 @@ function getEpisodes(slug) {
 function extractWebLive(slug) {
     if (!slug) return null;
     var candidates = [];
-    // Variantes comunes de páginas de canal en la web
+
+    // Páginas que suelen responder 200 (las .html simples dan 403 en GrayJay)
+    candidates.push("https://pelisjuanita.com/tv/hzplayer.php?id=" + encodeURIComponent(btoaSafe(slug)));
+    candidates.push("https://pelisjuanita.com/tv/hzplayer.php?id=" + encodeURIComponent(btoaSafe(slug.toUpperCase())));
+    candidates.push("https://pelisjuanita.com/tv/jjfutbol2.html?name=" + encodeURIComponent(slug));
+    candidates.push("https://pelisjuanita.com/tv/jjfutbol2.html?name=" + encodeURIComponent(slug.replace(/-/g, " ")));
+
+    // Variantes de .html por si alguna no está bloqueada
     candidates.push("https://pelisjuanita.com/tv/" + slug + ".html");
     candidates.push("https://pelisjuanita.com/tv/" + slug.replace(/-/g, "") + ".html");
-    candidates.push("https://pelisjuanita.com/tv/" + slug.replace(/-/g, "_") + ".html");
-    // Algunas usan nombres sin guiones o especiales
-    var simple = slug.replace(/[^a-z0-9]/gi, "");
-    if (simple && simple !== slug) candidates.push("https://pelisjuanita.com/tv/" + simple + ".html");
+
+    var headers = {
+        "User-Agent": UA,
+        "Referer": "https://pelisjuanita.com/",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "es-ES,es;q=0.9"
+    };
 
     for (var i = 0; i < candidates.length; i++) {
         var pageUrl = candidates[i];
         addDebug("[web-live] probando " + pageUrl);
-        var html = httpGet(pageUrl, { "Referer": "https://pelisjuanita.com/" });
-        if (!html || html.length < 200) continue;
-        // Evitar páginas de acceso / Cloudflare / login
-        if (/Acceso|Just a moment|challenge-platform|cf-chl/i.test(html.substring(0, 800))) {
+        var html = httpGet(pageUrl, headers);
+        if (!html || html.length < 200) {
+            addDebug("[web-live] vacío o corto");
+            continue;
+        }
+        if (/Acceso|Just a moment|challenge-platform|cf-chl|Enable JavaScript/i.test(html.substring(0, 1200))) {
             addDebug("[web-live] bloqueado o acceso");
             continue;
         }
+
         var hit = findStreamIn(html, pageUrl);
         if (hit && isM3u8Url(hit)) {
-            addDebug("[web-live] OK m3u8 -> " + hit.substring(0, 100));
+            addDebug("[web-live] OK m3u8 -> " + hit.substring(0, 120));
             return hit;
         }
-        // Intento más profundo con genericExtract (sigue redirects, unpack, etc.)
+
+        var m = html.match(/https?:\/\/[^"'\s<>\\]+\.m3u8[^"'\s<>\\]*/i);
+        if (m) {
+            var clean = cleanUrl(m[0]);
+            addDebug("[web-live] OK regex -> " + clean.substring(0, 120));
+            return clean;
+        }
+
         var extracted = genericExtract(pageUrl);
         if (extracted && isM3u8Url(extracted)) {
-            addDebug("[web-live] OK via generic -> " + extracted.substring(0, 100));
+            addDebug("[web-live] OK via generic -> " + extracted.substring(0, 120));
             return extracted;
         }
     }
     addDebug("[web-live] sin m3u8 en páginas web");
     return null;
+}
+
+function btoaSafe(str) {
+    var chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    var out = "", i = 0, len = str.length;
+    while (i < len) {
+        var c1 = str.charCodeAt(i++) & 0xff;
+        var c2 = i < len ? str.charCodeAt(i++) & 0xff : NaN;
+        var c3 = i < len ? str.charCodeAt(i++) & 0xff : NaN;
+        var e1 = c1 >> 2;
+        var e2 = ((c1 & 3) << 4) | (isNaN(c2) ? 0 : c2 >> 4);
+        var e3 = isNaN(c2) ? 64 : (((c2 & 15) << 2) | (isNaN(c3) ? 0 : c3 >> 6));
+        var e4 = isNaN(c3) ? 64 : (c3 & 63);
+        out += chars.charAt(e1) + chars.charAt(e2) + (e3 === 64 ? "=" : chars.charAt(e3)) + (e4 === 64 ? "=" : chars.charAt(e4));
+    }
+    return out;
 }
 
 function doDetails(url) {
@@ -867,21 +903,21 @@ function doDetails(url) {
     if (c) {
         var ckey = c[1];
         var ch = _channels[ckey];
-        if (!ch) { doHome(); ch = _channels[ckey]; } // si se abrió sin pasar por el home
+        if (!ch) { doHome(); ch = _channels[ckey]; }
         if (!ch) throw new ScriptException("Canal no encontrado: " + ckey + "\n" + _debugLog);
         var csrc = [];
 
-        // 1. Intentar el m3u8 real que usa la web (lo que captura Web Video Cast)
+        // 1. Intentar m3u8 real de la web
         var webM3u8 = extractWebLive(ckey);
         if (webM3u8) {
             csrc.push(buildSource(webM3u8, "Web HLS", "https://pelisjuanita.com/", false));
             addDebug("[canal] usando m3u8 de la web");
         }
 
-        // 2. m3u8 de la API (raro que venga)
+        // 2. m3u8 de la API
         if (ch.m3u8) csrc.push(mkHls(cleanUrl(ch.m3u8), "API HLS"));
 
-        // 3. DASH de la API como último recurso (suele estar cifrado)
+        // 3. DASH de la API (último recurso, suele estar cifrado)
         if (ch.dash && typeof DashSource !== "undefined") {
             csrc.push(new DashSource({ name: "DASH (API)", url: cleanUrl(ch.dash), duration: 0 }));
         }
