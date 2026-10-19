@@ -495,9 +495,39 @@ function hostPriority(host) {
     return 3;
 }
 
+function hostOrigin(url) {
+    try { return url.match(/^(https?:\/\/[^\/]+)/i)[1] + "/"; } catch (e) { return ""; }
+}
+
+// Crea la fuente con el Referer del reproductor embebido (muchos CDN lo exigen: Dood, StreamWish)
+function buildSource(url, name, ref, isMp4) {
+    var rm = null;
+    if (ref) {
+        rm = {
+            allowByteSkip: true,
+            headers: { "Referer": ref, "User-Agent": UA },
+            modifyRequest: function (u, headers) {
+                var h = headers || {};
+                h["Referer"] = ref;
+                if (!h["User-Agent"]) h["User-Agent"] = UA;
+                return { url: u, headers: h };
+            }
+        };
+    }
+    var o;
+    if (isMp4) {
+        o = { name: name, url: url, container: "video/mp4", width: 0, height: 0, duration: 0, codec: "" };
+        if (rm) o.requestModifier = rm;
+        return new VideoUrlSource(o);
+    }
+    o = { name: name, url: url, duration: 0 };
+    if (rm) o.requestModifier = rm;
+    return new HLSSource(o);
+}
+
 // Confirma que la URL devuelve realmente una playlist HLS (evita fuentes muertas que dejan el reproductor cargando)
-function isLiveHls(url) {
-    var body = httpGet(url, {});
+function isLiveHls(url, ref) {
+    var body = httpGet(url, ref ? { "Referer": ref } : {});
     if (!body) return true; // sin respuesta (p. ej. dominio no permitido): no se descarta
     var ok = body.indexOf("#EXTM3U") !== -1;
     if (!ok) addDebug("[hls] respuesta: " + body.substring(0, 80).replace(/\s+/g, " "));
@@ -508,7 +538,7 @@ function resolveSources(servidores) {
     var sources = [];
     if (!servidores || !servidores.length) return sources;
 
-    var list = [], skipped = [], skippedHosts = {};
+    var list = [], skipped = [], skippedHosts = {}, unverified = [];
     for (var i = 0; i < servidores.length; i++) {
         var srv = servidores[i];
         var url = cleanUrl(srv.url || srv.link || "");
@@ -536,17 +566,21 @@ function resolveSources(servidores) {
             continue;
         }
 
+        var refOrigin = hostOrigin(_lastUrl || it.url);
         var forceMp4 = hls.indexOf("mp4:") === 0;
         if (forceMp4) hls = hls.substring(4);
         var isMp4 = forceMp4 || (!isM3u8Url(hls) && (hls.indexOf(".mp4") !== -1 || hls.indexOf("token=") !== -1));
-        if (!isMp4 && !isLiveHls(hls)) { addDebug("[resolve] descartado (no es m3u8 válido): " + name); continue; }
+        var verified = isMp4 || isLiveHls(hls, refOrigin);
 
-        addDebug("[resolve] url=" + hls.substring(0, 110));
-        var src = isMp4
-            ? new VideoUrlSource({ name: name, url: hls, container: "video/mp4", width: 0, height: 0, duration: 0, codec: "" })
-            : mkHls(hls, name);
-        if (src) { sources.push(src); addDebug("[resolve] OK: " + name); }
+        addDebug("[resolve] url=" + hls.substring(0, 90) + " ref=" + refOrigin + (verified ? "" : " (sin verificar)"));
+        var src = buildSource(hls, name, refOrigin, isMp4);
+        if (!src) continue;
+        if (verified) { sources.push(src); addDebug("[resolve] OK: " + name); }
+        else unverified.push(src);
     }
+
+    // Las no verificadas se ofrecen igual, al final, por si la validación fue un falso negativo
+    for (var u = 0; u < unverified.length && sources.length < MAX_SOURCES; u++) sources.push(unverified[u]);
 
     // Diagnóstico: si no hubo ninguna fuente, inspeccionar los hosts salteados para ver cómo cargan
     if (sources.length === 0) {
