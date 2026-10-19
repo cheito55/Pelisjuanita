@@ -11,6 +11,7 @@ var AES_IV  = "1234567890123456";
 
 var PPID = new PlatformID("Pelisjuanita", "Pelisjuanita", PID);
 var _debugLog = "";
+var _channels = {};
 
 function addDebug(msg) { _debugLog += String(msg) + "\n"; }
 
@@ -41,13 +42,13 @@ function mkThumb(url) {
     return new Thumbnails([new Thumbnail(url, 100)]);
 }
 
-function mkVideo(id, title, thumb, url, author) {
+function mkVideo(id, title, thumb, url, author, isLive) {
     return new PlatformVideo({
         id: new PlatformID("Pelisjuanita", String(id), PID),
         name: title || "Sin título",
         thumbnails: mkThumb(thumb),
         author: new PlatformAuthorLink(PPID, author || "Pelisjuanita", "https://pelisjuanita.com", "", 0),
-        uploadDate: 0, url: url, duration: 0, viewCount: 0, isLive: false
+        uploadDate: 0, url: url, duration: 0, viewCount: 0, isLive: !!isLive
     });
 }
 
@@ -271,7 +272,9 @@ function doHome() {
         for (var i = 0; i < items.length && videos.length < 60; i++) {
             var it = items[i];
             if (it.tipo === "TV" || it.m3u8 || it.dash) {
-                videos.push(mkVideo("ch_" + (it.slug || it.nombre), "[TV] " + (it.nombre || "Canal"), it.logo || "", "pj://channel/" + (it.slug || it.nombre), "TV en Vivo"));
+                var ckey = String(it.slug || it.nombre);
+                _channels[ckey] = it;
+                videos.push(mkVideo("ch_" + ckey, "[TV] " + (it.nombre || "Canal"), it.logo || "", "pj://channel/" + ckey, "TV en Vivo", true));
             } else if (it.slug) {
                 var type = (it.tipo === "serie") ? "serie" : "movie";
                 videos.push(mkVideo(type + "_" + it.slug, (type === "serie" ? "[Serie] " : "") + (it.titulo || it.nombre || ""), fixImg(it.img_frente || it.poster), "pj://" + type + "/" + it.slug, "Pelisjuanita"));
@@ -336,6 +339,21 @@ function doDetails(url) {
         return mkDetail("m_" + slug, d.titulo || slug, fixImg(d.img_frente), url, sources, desc);
     }
 
+    var c = url.match(/pj:\/\/channel\/([^\/]+)/);
+    if (c) {
+        var ckey = c[1];
+        var ch = _channels[ckey];
+        if (!ch) { doHome(); ch = _channels[ckey]; } // si se abrió sin pasar por el home
+        if (!ch) throw new ScriptException("Canal no encontrado: " + ckey + "\n" + _debugLog);
+        var csrc = [];
+        if (ch.m3u8) csrc.push(mkHls(cleanUrl(ch.m3u8), "Directo"));
+        if (ch.dash && typeof DashSource !== "undefined") {
+            csrc.push(new DashSource({ name: "DASH", url: cleanUrl(ch.dash), duration: 0 }));
+        }
+        if (!csrc.length) throw new ScriptException("Canal sin m3u8/dash. Datos: " + JSON.stringify(ch).substring(0, 400));
+        return mkDetail("ch_" + ckey, ch.nombre || ckey, ch.logo || "", url, csrc, "TV en vivo", true);
+    }
+
     var s = url.match(/pj:\/\/serie\/([^\/]+)/);
     if (s) {
         var sslug = s[1];
@@ -348,7 +366,7 @@ function doDetails(url) {
     return mkDetail("", "No soportado", "", url, [], "");
 }
 
-function mkDetail(id, name, thumb, url, sources, description) {
+function mkDetail(id, name, thumb, url, sources, description, isLive) {
     var valid = [];
     for (var i = 0; i < (sources || []).length; i++) if (sources[i]) valid.push(sources[i]);
     var desc = description || "";
@@ -358,7 +376,7 @@ function mkDetail(id, name, thumb, url, sources, description) {
         name: name || "Sin título",
         thumbnails: mkThumb(thumb),
         author: new PlatformAuthorLink(PPID, "Pelisjuanita", "https://pelisjuanita.com", "", 0),
-        uploadDate: 0, url: url, duration: 0, viewCount: 0, isLive: false,
+        uploadDate: 0, url: url, duration: 0, viewCount: 0, isLive: !!isLive,
         video: new VideoSourceDescriptor(valid),
         description: desc
     });
