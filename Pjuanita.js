@@ -328,7 +328,11 @@ function doDetails(url) {
         var servidores = decryptServidores(d.servidores);
         var sources = resolveSources(servidores);
         var desc = (d.sinopsis || "") + "\n\nAño: " + (d.año || "") + "\nGénero: " + (d.genero || "");
-        if (sources.length === 0) desc += "\n\n⚠️ No se pudieron obtener fuentes. Revisá la sección DEBUG.";
+        if (sources.length === 0) {
+            // Sin fuentes GrayJay muestra "video no disponible" y oculta la descripción,
+            // así que el DEBUG se muestra como mensaje de error.
+            throw new ScriptException("SIN FUENTES\n" + _debugLog);
+        }
         return mkDetail("m_" + slug, d.titulo || slug, fixImg(d.img_frente), url, sources, desc);
     }
 
@@ -382,7 +386,7 @@ if (typeof source !== "undefined") {
 
     source.getContentDetails = function(url) {
         try { return doDetails(url); }
-        catch (e) { return mkDetail("error", "Error", "", url, [], String(e)); }
+        catch (e) { throw new ScriptException(String(e && e.message ? e.message : e)); }
     };
 
     source.getVideoDetails = function(url) { return source.getContentDetails(url); };
